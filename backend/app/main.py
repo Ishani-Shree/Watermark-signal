@@ -1,11 +1,17 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
+from datetime import datetime, timezone
 
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+
+from .auth import create_access_token, get_current_user_id, hash_password, verify_password
 from .config import settings
 from .db import engine
 from .detection import compute_score, upsert_event
 from .providers import get_provider
+from .ranking import build_digest
 
 app = FastAPI(title="Watermark API")
 
@@ -20,6 +26,28 @@ app.add_middleware(
 # and baselines like anything else, but no event scoring of their own
 # (nothing to compare them against).
 INDEX_SYMBOLS = {"^NSEI"}
+
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class WatchlistAddRequest(BaseModel):
+    symbol: str
+    note: str | None = None
+    target_price: float | None = None
+
+
+class WatchlistUpdateRequest(BaseModel):
+    note: str | None = None
+    target_price: float | None = None
+    muted_kinds: list[str] | None = None
 
 
 @app.get("/health")
@@ -173,7 +201,128 @@ def list_events():
     return {"events": [dict(r) for r in rows]}
 
 
+@app.post("/auth/signup")
+def signup(body: SignupRequest):
+    with engine.begin() as conn:
+        try:
+            row = conn.execute(
+                text(
+                    "INSERT INTO users (email, password_hash) VALUES (:email, :hash) RETURNING id"
+                ),
+                {"email": body.email, "hash": hash_password(body.password)},
+            ).mappings().first()
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail="Email already registered")
+    return {"access_token": create_access_token(row["id"]), "token_type": "bearer"}
+
+
+@app.post("/auth/login")
+def login(body: LoginRequest):
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT id, password_hash FROM users WHERE email = :email"),
+            {"email": body.email},
+        ).mappings().first()
+
+    if row is None or not verify_password(body.password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    return {"access_token": create_access_token(row["id"]), "token_type": "bearer"}
+
+
+@app.get("/watchlist")
+def get_watchlist(user_id: int = Depends(get_current_user_id)):
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT w.symbol, s.name, w.note, w.target_price, w.muted_kinds, w.added_at
+                FROM watchlist_items w
+                JOIN symbols s ON s.symbol = w.symbol
+                WHERE w.user_id = :uid
+                ORDER BY w.added_at
+                """
+            ),
+            {"uid": user_id},
+        ).mappings().all()
+    return {"items": [dict(r) for r in rows]}
+
+
+@app.post("/watchlist")
+def add_to_watchlist(body: WatchlistAddRequest, user_id: int = Depends(get_current_user_id)):
+    with engine.begin() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM symbols WHERE symbol = :symbol"), {"symbol": body.symbol}
+        ).first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Unknown symbol")
+
+        # Idempotent add: UNIQUE (user_id, symbol) -- adding twice is a no-op,
+        # not an error.
+        conn.execute(
+            text(
+                """
+                INSERT INTO watchlist_items (user_id, symbol, note, target_price)
+                VALUES (:uid, :symbol, :note, :target_price)
+                ON CONFLICT (user_id, symbol) DO UPDATE
+                SET note = COALESCE(EXCLUDED.note, watchlist_items.note),
+                    target_price = COALESCE(EXCLUDED.target_price, watchlist_items.target_price)
+                """
+            ),
+            {
+                "uid": user_id,
+                "symbol": body.symbol,
+                "note": body.note,
+                "target_price": body.target_price,
+            },
+        )
+    return {"ok": True}
+
+
+@app.patch("/watchlist/{symbol}")
+def update_watchlist_item(
+    symbol: str, body: WatchlistUpdateRequest, user_id: int = Depends(get_current_user_id)
+):
+    fields = {}
+    if body.note is not None:
+        fields["note"] = body.note
+    if body.target_price is not None:
+        fields["target_price"] = body.target_price
+    if body.muted_kinds is not None:
+        fields["muted_kinds"] = body.muted_kinds
+
+    if not fields:
+        return {"ok": True}
+
+    set_clause = ", ".join(f"{k} = :{k}" for k in fields)
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                f"UPDATE watchlist_items SET {set_clause} WHERE user_id = :uid AND symbol = :symbol"
+            ),
+            {**fields, "uid": user_id, "symbol": symbol},
+        )
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Not in watchlist")
+    return {"ok": True}
+
+
+@app.delete("/watchlist/{symbol}")
+def remove_from_watchlist(symbol: str, user_id: int = Depends(get_current_user_id)):
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM watchlist_items WHERE user_id = :uid AND symbol = :symbol"),
+            {"uid": user_id, "symbol": symbol},
+        )
+    return {"ok": True}
+
+
 @app.get("/digest")
-def digest():
-    """User-facing read path. Placeholder until ranking layer lands (hours 15-19)."""
-    return {"events": [], "suppressed_count": 0}
+def digest(user_id: int = Depends(get_current_user_id)):
+    """User-facing read path (BUILD_PLAN.md sections 3 and 7): joins the
+    detection layer's events against this user's watchlist, applies mute
+    settings, and applies time-scaled materiality -- individual events for
+    a short gap since last visit, an aggregated peak/trough/event-count
+    path summary for a long one. Also advances this user's read watermark."""
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        return build_digest(conn, user_id, now)

@@ -38,3 +38,17 @@ Format: date/hour, decision, alternative rejected, why.
   (`UnicodeEncodeError`) printing the sigma character during local testing.
   Render's Linux runtime and the browser both handle UTF-8 fine either way,
   but there's no reason to leave a landmine for local debugging on Windows.
+- **Hour 15-19** — Dropped `passlib` for password hashing; call `bcrypt`
+  directly instead. `passlib` is unmaintained since 2020 and its bcrypt
+  backend crashes outright against `bcrypt>=4.1` (a hardcoded internal
+  self-test hits the library's own 72-byte input limit and raises instead
+  of the version-detection path catching it). `bcrypt` itself works fine;
+  only passlib's compatibility shim was broken. Direct calls are also just
+  simpler -- one less abstraction layer for two functions.
+- **Hour 15-19** — Digest fetch itself advances the read watermark (no
+  separate "mark as read" call) -- checking the digest IS the act of
+  reading, matching the plan's "unread inbox" framing. Caught and fixed a
+  real bug while writing this: the watermark must be READ before it's
+  advanced, since advancing first would make every visit look like a
+  first visit. Advance is still monotonic (`GREATEST`) so two concurrent
+  reads can't move it backward.
