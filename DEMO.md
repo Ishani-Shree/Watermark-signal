@@ -21,6 +21,13 @@ before you present so the first request is not a cold start.
 > "This is a market watchlist. But I'm not opening on a list of prices — I'm
 > opening on what changed since I last looked."
 
+**Say the live-data line early — it reframes everything that follows:**
+
+> "This runs on live NSE data — 48 symbols, every ten minutes, scored against
+> baselines built from a year of real history. What you're about to see is a
+> replayed scenario, because the market is closed and a spike-and-revert has to
+> be reproducible on camera. Same pipeline either way."
+
 Point at the headline: **"The price is where you left it. Here's what you
 missed."**
 
@@ -109,10 +116,20 @@ move, on a broker's surface, is a reputational and regulatory problem. Linking
 raw headlines without asserting causation would be the safe version.
 
 **"Isn't the replay feed just fake data?"**
-The *interface* is the deliverable. The data source sits behind an adapter so
-provider flakiness can't reach the correctness logic, and so the same logic is
-deterministically testable. The demo fast-forwards the feed's *clock* — every
-event you saw was produced by the real detection pipeline, not injected.
+No — **the deployment runs on live NSE data.** The cron ingests real prices for
+48 symbols every 10 minutes and scores them against baselines built from a full
+year of real history. On a live cycle SBI Life scored 79 at +3.4σ on 1.9× volume,
+and 41 of 47 stocks correctly stayed below the bar.
+
+The demo replays a scripted day for two reasons: NSE is closed most of the time,
+so a live demo would correctly show nothing; and a spike-and-revert has to be
+reproducible on camera. It fast-forwards the feed's *clock* — the detection layer
+reaches its own conclusions, nothing is injected. `PROVIDER` and `DEMO_CONTROLS`
+are separate switches so live data and the demo coexist, and Reset re-ingests
+real prices the moment the demo ends.
+
+If pressed: `/diagnostics/live-provider` proves the live upstream is reachable
+from the deployed host. We tested that rather than assuming it.
 
 **"What would you do next?"**
 Move ingestion to a work queue so symbols shard across workers; use a batch

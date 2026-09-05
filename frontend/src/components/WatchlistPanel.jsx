@@ -80,6 +80,16 @@ function Holding({ item, onUpdate, onRemove }) {
         <div className="holding__price">
           <div className="holding__value">
             {item.price != null ? Number(item.price).toFixed(2) : "—"}
+            {item.change_pct != null && (
+              <span
+                className={`holding__change ${
+                  item.change_pct >= 0 ? "holding__change--up" : "holding__change--down"
+                }`}
+              >
+                {item.change_pct >= 0 ? "+" : ""}
+                {item.change_pct.toFixed(2)}%
+              </span>
+            )}
           </div>
           <div className="holding__asof">
             <span className={`badge badge--${state}`}>{state}</span>
@@ -88,6 +98,34 @@ function Holding({ item, onUpdate, onRemove }) {
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Market context. A price alone is not market information -- these
+          three say whether today's move is unusual for THIS stock. */}
+      <div className="market-row">
+        {item.volume_ratio != null && (
+          <span className="market-stat" title="today's volume vs its own 20-day average">
+            <span className="market-stat__label">Vol</span>
+            {item.volume_ratio.toFixed(1)}× avg
+          </span>
+        )}
+        {item.range_position != null && (
+          <span className="market-stat" title="position within the 52-week range">
+            <span className="market-stat__label">52w</span>
+            <span className="range-bar" aria-hidden="true">
+              <span
+                className="range-bar__dot"
+                style={{ left: `${Math.min(100, Math.max(0, item.range_position * 100))}%` }}
+              />
+            </span>
+            {Math.round(item.range_position * 100)}%
+          </span>
+        )}
+        {item.wk52_low != null && item.wk52_high != null && (
+          <span className="market-stat market-stat--muted">
+            {Number(item.wk52_low).toFixed(0)} – {Number(item.wk52_high).toFixed(0)}
+          </span>
+        )}
       </div>
 
       <input

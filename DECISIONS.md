@@ -45,6 +45,46 @@ Format: date/hour, decision, alternative rejected, why.
   of the version-detection path catching it). `bcrypt` itself works fine;
   only passlib's compatibility shim was broken. Direct calls are also just
   simpler -- one less abstraction layer for two functions.
+- **Hour 45+ — the deployment runs on LIVE data.** The replay feed was
+  chosen partly on an untested claim from our own plan: that yfinance would
+  be rate-limited from a datacenter IP. `/diagnostics/live-provider` was
+  added to answer that with evidence instead of assumption, and the answer
+  is that it works. Live is now the production provider; replay is the
+  fallback and the demo instrument, which is what the adapter was always for.
+- **Hour 45+** — Live quotes are fetched in ONE batched request for the
+  whole universe (48 symbols in ~3.5s) rather than per symbol via `.info`
+  (~2.8s EACH, ~2 minutes for the universe). With a remote upstream the
+  request count is what scales -- and what gets you throttled.
+- **Hour 45+** — Volume and previous close come from DAILY bars; price and
+  timestamp come from MINUTE bars. Mixing resolutions is deliberate and the
+  alternative is a silent, catastrophic bug: `avg_volume_20d` is an average
+  of *daily* volume, and RELIANCE's last minute-bar is ~635k against a 10.5M
+  daily average -- so scoring a minute-bar volume against it would peg every
+  stock at ~0.06x forever. The volume signal would go dead without ever
+  raising an error. Daily timestamps alone were no good either: they change
+  once a day, collapsing every poll into one snapshot and erasing the
+  intraday path revert detection depends on.
+- **Hour 45+** — Demo controls are gated on their own `DEMO_CONTROLS` flag,
+  not on `provider == replay`. The old gate meant running on real data
+  silently disabled the demo: the choice was "live data" OR "can demonstrate
+  it", and showing the scenario would have meant redeploying with a
+  different provider mid-presentation. `run_ingest_cycle` now takes a
+  provider override so a scripted day can be replayed through the real
+  pipeline while the deployment itself stays live.
+- **Hour 45+** — `/demo/reset` re-ingests immediately instead of only
+  clearing. A replayed scenario writes scripted prices over real ones (the
+  script is anchored to now, so it wins on `source_ts`); clearing alone
+  would leave the app empty until the next cron tick, up to ten minutes of
+  showing nothing after a demo. Verified: RELIANCE goes from the scripted
+  1562 back to the real 1322 the moment reset runs.
+- **Hour 45+** — Providers declare their own `source_name`, and stored rows
+  are labelled from the provider that actually ran rather than from the
+  configured one. With an overridable provider, reading config would
+  mislabel every demo row as live.
+- **Hour 42-45 (audit)** — `PATCH`/`DELETE` on a watchlist item the caller
+  does not have returned 200. Deleting nothing is not the same as deleting
+  something: the UI would animate a removal that never happened, and a real
+  client bug would be invisible. Both now 404.
 - **Hour 42-45 (audit)** — `POST /demo/reset` and `POST /demo/chaos` were
   reachable **unauthenticated**. Being gated to the replay provider is not a
   security control: the deployed instance *runs* on the replay feed, so the

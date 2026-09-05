@@ -37,9 +37,32 @@ class PriceProvider(ABC):
     source directly. Callers get a Quote or a list of Quotes regardless of
     whether the data came from yfinance or the scripted replay feed."""
 
+    #: Identifies the data source in stored rows. A caller that instead
+    #: reads the configured provider name would mislabel any cycle run
+    #: with an overridden provider.
+    source_name: str = "unknown"
+
     @abstractmethod
     def get_latest(self, symbol: str) -> Quote | None:
         ...
+
+    def get_latest_batch(self, symbols: list[str]) -> dict[str, Quote]:
+        """Fetch many symbols at once.
+
+        The default loops, which is right for an in-memory feed. A network
+        provider should override it: with a remote upstream the request
+        count, not the parsing, is what grows with the universe -- and it is
+        also what gets you rate-limited.
+
+        A symbol that fails is simply absent from the result rather than
+        raising, so one bad ticker cannot cost the whole batch.
+        """
+        quotes: dict[str, Quote] = {}
+        for symbol in symbols:
+            quote = self.get_latest(symbol)
+            if quote is not None:
+                quotes[symbol] = quote
+        return quotes
 
     @abstractmethod
     def get_history(self, symbol: str, days: int) -> list[Quote]:

@@ -118,6 +118,8 @@ class ReplayProvider(PriceProvider):
     """Scripted, deterministic feed. Used when the live provider is down
     or when a demo needs to reproduce the same sequence on camera."""
 
+    source_name = "replay"
+
     def get_latest(self, symbol: str) -> Quote | None:
         script = SCRIPTS.get(symbol, DEFAULT_SCRIPT)
         pinned = _clock["pinned_minute"]

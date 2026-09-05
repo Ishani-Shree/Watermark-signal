@@ -14,6 +14,8 @@ from .detection import compute_score, upsert_event
 from .provider_health import ProviderUnavailable, health
 from .ratelimit import rate_limit_auth
 from .providers import get_provider
+from .providers.guarded import GuardedProvider
+from .providers.replay_provider import ReplayProvider
 from .providers import replay_provider as replay_clock
 from .providers.yfinance_provider import YFinanceProvider
 from .ranking import acknowledge, build_digest
@@ -178,7 +180,7 @@ def demo_chaos(enabled: bool, user_id: int = Depends(get_current_user_id)):
     """Flip the upstream provider into a simulated outage. Exists so the
     degraded path can be demonstrated deliberately (BUILD_PLAN.md section
     13, step 4) instead of hoping Yahoo misbehaves during the demo."""
-    _require_replay_provider()
+    _require_demo_controls()
     health.chaos_enabled = enabled
     if not enabled:
         # Turning chaos off also clears the breaker, so recovery is
@@ -187,12 +189,17 @@ def demo_chaos(enabled: bool, user_id: int = Depends(get_current_user_id)):
     return {"chaos_enabled": health.chaos_enabled, "provider_health": health.snapshot()}
 
 
-def run_ingest_cycle(conn) -> dict:
+def run_ingest_cycle(conn, provider=None) -> dict:
     """One full ingest + detection pass. Extracted so the cron endpoint and
     the demo scenario runner drive the exact same code path -- the demo
-    fast-forwards the feed clock, it does not inject events."""
-    provider = get_provider()
-    confidence = "replay" if settings.provider == "replay" else "live"
+    fast-forwards the feed clock, it does not inject events.
+
+    `provider` is overridable so a demo can replay a scripted day while the
+    deployment itself runs on live data. Without that, showing the scenario
+    would mean redeploying with a different provider -- on stage.
+    """
+    provider = provider or get_provider()
+    confidence = "replay" if provider.source_name == "replay" else "live"
 
     rows = conn.execute(
         text(
@@ -214,21 +221,22 @@ def run_ingest_cycle(conn) -> dict:
     failed_symbols = []
     breaker_tripped = False
 
-    for symbol in symbol_info:
-        # One sick symbol must not abort the whole cycle. An open breaker,
-        # on the other hand, should stop the run immediately rather than
-        # retrying a provider we already know is down 48 more times.
-        try:
-            quote = provider.get_latest(symbol)
-        except ProviderUnavailable:
-            breaker_tripped = True
-            break
-        except Exception:  # noqa: BLE001 - upstream is unofficial
-            failed_symbols.append(symbol)
-            continue
+    # One upstream call for the whole universe. With a remote provider the
+    # request count is what scales with watchlist size -- and what gets you
+    # throttled -- not the parsing.
+    try:
+        fetched = provider.get_latest_batch(list(symbol_info))
+    except ProviderUnavailable:
+        fetched, breaker_tripped = {}, True
+    except Exception:  # noqa: BLE001 - upstream is unofficial
+        fetched = {}
 
+    for symbol in symbol_info:
+        quote = fetched.get(symbol)
         if quote is None:
-            failed_symbols.append(symbol)
+            # Absent from the batch: this symbol failed, the rest carry on.
+            if not breaker_tripped:
+                failed_symbols.append(symbol)
             continue
 
         # A live quote missing price/volume/prev_close is routine with an
@@ -273,6 +281,7 @@ def run_ingest_cycle(conn) -> dict:
     # observable instead of merely asserted.
     ingested = 0
     refreshed = 0
+    conflicts = 0
     if rows_to_write:
         result = conn.execute(
             text(
@@ -290,8 +299,19 @@ def run_ingest_cycle(conn) -> dict:
                     CAST(:confidences AS text[])
                 )
                 ON CONFLICT (symbol, source_ts) DO UPDATE
-                    SET fetched_at = EXCLUDED.fetched_at
-                RETURNING (xmax = 0) AS inserted
+                    SET fetched_at = EXCLUDED.fetched_at,
+                        -- Same symbol, same market instant, DIFFERENT price:
+                        -- the source is disagreeing with itself. Keep the
+                        -- first value we were given -- overwriting would
+                        -- rewrite history and make the earlier reading
+                        -- unrecoverable -- but record the disagreement so it
+                        -- is visible rather than silently resolved.
+                        confidence = CASE
+                            WHEN snapshots.price IS DISTINCT FROM EXCLUDED.price
+                                THEN 'conflicting'
+                            ELSE snapshots.confidence
+                        END
+                RETURNING (xmax = 0) AS inserted, confidence
                 """
             ),
             {
@@ -305,9 +325,10 @@ def run_ingest_cycle(conn) -> dict:
                 "confidences": [r["confidence"] for r in rows_to_write],
             },
         )
-        flags = [row[0] for row in result.fetchall()]
-        ingested = sum(1 for f in flags if f)
-        refreshed = len(flags) - ingested
+        written = result.fetchall()
+        ingested = sum(1 for row in written if row[0])
+        refreshed = len(written) - ingested
+        conflicts = sum(1 for row in written if row[1] == "conflicting")
 
     for symbol, quote in quotes_by_symbol.items():
         if symbol in INDEX_SYMBOLS:
@@ -344,6 +365,8 @@ def run_ingest_cycle(conn) -> dict:
         # Non-zero means dedup did its job: the same quote arrived again and
         # was not double-counted.
         "deduped": refreshed,
+        # The source contradicting itself: same instant, different price.
+        "conflicts": conflicts,
         "events_touched": events_touched,
         "failed": len(failed_symbols),
         "breaker_tripped": breaker_tripped,
@@ -370,13 +393,31 @@ def ingest():
         return run_ingest_cycle(conn)
 
 
-def _require_replay_provider():
-    """Demo controls only exist for the scripted feed -- you cannot
-    fast-forward a live market. This is the gate, not a config flag."""
-    if settings.provider != "replay":
-        raise HTTPException(
-            status_code=403, detail="Demo controls are only available on the replay feed"
-        )
+def _as_float(value) -> float | None:
+    """Postgres NUMERIC arrives as Decimal; mixing it with float raises.
+    Nulls stay null rather than becoming a misleading 0."""
+    return float(value) if value is not None else None
+
+
+def _require_demo_controls():
+    """Demo controls are governed by their own switch, not by which provider
+    happens to be configured.
+
+    Tying them to `provider == replay` meant running on live data silently
+    disabled the demo -- so the choice was "real data" OR "can demo it", and
+    the only way to show the scenario was to redeploy with a different
+    provider. On stage. They are also authenticated; this flag is the second
+    lock, so an operator can turn them off entirely without a code change.
+    """
+    if not settings.demo_controls:
+        raise HTTPException(status_code=403, detail="Demo controls are disabled")
+
+
+def _replay_provider():
+    """The scripted feed explicitly, whatever the deployment runs on. Still
+    wrapped in the guard so a demo exercises the same breaker and chaos
+    switch as production."""
+    return GuardedProvider(ReplayProvider())
 
 
 @app.post("/demo/run-scenario")
@@ -386,7 +427,7 @@ def demo_run_scenario(user_id: int = Depends(get_current_user_id)):
     scoring layer sees the same quotes it would have seen live and reaches
     its own conclusions -- this only removes the wait. Makes the 5-minute
     demo deterministic (BUILD_PLAN.md section 13)."""
-    _require_replay_provider()
+    _require_demo_controls()
 
     minutes = replay_clock.scenario_minutes()
     span = float(max(minutes)) if minutes else 0.0
@@ -399,7 +440,7 @@ def demo_run_scenario(user_id: int = Depends(get_current_user_id)):
         for minute in minutes:
             replay_clock.pin_minute(minute, anchor_end=anchor_end, span=span)
             with engine.begin() as conn:
-                result = run_ingest_cycle(conn)
+                result = run_ingest_cycle(conn, provider=_replay_provider())
             steps.append(
                 {
                     "minute": minute,
@@ -445,11 +486,29 @@ def demo_reset(user_id: int = Depends(get_current_user_id)):
     without authentication anyone holding the public URL could wipe the
     data this endpoint deletes.
     """
-    _require_replay_provider()
+    _require_demo_controls()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM events"))
         conn.execute(text("DELETE FROM snapshots"))
-    return {"ok": True}
+
+    # A replayed scenario writes scripted prices over real ones (the script
+    # is anchored to now, so it wins on source_ts). Clearing alone would
+    # leave the app empty until the next cron tick -- up to ten minutes of
+    # showing nothing. Re-ingesting immediately puts genuine prices back the
+    # moment the demo ends.
+    restored = {}
+    try:
+        with engine.begin() as conn:
+            restored = run_ingest_cycle(conn)
+    except Exception as exc:  # noqa: BLE001 - reset itself must still succeed
+        return {"ok": True, "restored": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+    return {
+        "ok": True,
+        "restored": True,
+        "source": settings.provider,
+        "symbols": restored.get("ingested", 0),
+    }
 
 
 @app.get("/snapshots/{symbol}/latest")
@@ -534,20 +593,32 @@ def login(body: LoginRequest):
 
 @app.get("/watchlist")
 def get_watchlist(user_id: int = Depends(get_current_user_id)):
-    """Joins each watchlist item against its latest snapshot -- current
-    price, staleness (source/confidence), and observation time -- so the
-    frontend never has to make N extra calls to show live state."""
+    """The watchlist view: current market state per holding.
+
+    Returns the day's move, volume against its own 20-day norm, and where
+    the price sits in its 52-week range -- not just a bare price. A price on
+    its own is not market information: 1322 tells you nothing without
+    knowing the stock closed at 1302 yesterday, is trading at 1.2x its usual
+    volume, and sits 19% below its 52-week high.
+
+    All of it comes from the snapshot and baseline rows already joined here,
+    so it costs no extra round trip.
+    """
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 """
                 SELECT w.symbol, s.name, w.note, w.target_price, w.muted_kinds, w.added_at,
                        latest.price, latest.source, latest.confidence,
-                       latest.source_ts, latest.fetched_at
+                       latest.source_ts, latest.fetched_at,
+                       latest.prev_close, latest.volume,
+                       b.avg_volume_20d, b.wk52_high, b.wk52_low
                 FROM watchlist_items w
                 JOIN symbols s ON s.symbol = w.symbol
+                LEFT JOIN baselines b ON b.symbol = w.symbol
                 LEFT JOIN LATERAL (
-                    SELECT price, source, confidence, source_ts, fetched_at
+                    SELECT price, source, confidence, source_ts, fetched_at,
+                           prev_close, volume
                     FROM snapshots
                     WHERE snapshots.symbol = w.symbol
                     ORDER BY source_ts DESC
@@ -559,7 +630,35 @@ def get_watchlist(user_id: int = Depends(get_current_user_id)):
             ),
             {"uid": user_id},
         ).mappings().all()
-    return {"items": [dict(r) for r in rows]}
+
+    items = []
+    for row in rows:
+        item = dict(row)
+        price = _as_float(row["price"])
+        prev_close = _as_float(row["prev_close"])
+        volume = row["volume"]
+        avg_volume = _as_float(row["avg_volume_20d"])
+        high = _as_float(row["wk52_high"])
+        low = _as_float(row["wk52_low"])
+
+        item["change_pct"] = (
+            (price - prev_close) / prev_close * 100
+            if price is not None and prev_close
+            else None
+        )
+        item["volume_ratio"] = (
+            volume / avg_volume if volume is not None and avg_volume else None
+        )
+        # Where in the 52-week band this price sits: 0 = at the low,
+        # 1 = at the high. Context a raw number cannot give.
+        item["range_position"] = (
+            (price - low) / (high - low)
+            if price is not None and high is not None and low is not None and high > low
+            else None
+        )
+        items.append(item)
+
+    return {"items": items}
 
 
 @app.post("/watchlist")

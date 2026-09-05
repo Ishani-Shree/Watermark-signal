@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     provider: str = "replay"  # 'yfinance' | 'replay'
     env: str = "dev"
 
+    # Demo controls are gated on their own switch rather than on which
+    # provider is configured, so the deployment can run on live data and
+    # still replay a scripted day on demand.
+    demo_controls: bool = True
+
     # Comma-separated exact origins. Local Vite ports are included because
     # it picks the next free one when 5173 is taken.
     cors_origins: str = (

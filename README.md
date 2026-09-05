@@ -338,13 +338,44 @@ price history.
 |---|---|---|
 | `DATABASE_URL` | backend | Postgres connection string |
 | `JWT_SECRET` | backend | Signing key for auth tokens |
-| `PROVIDER` | backend | `replay` (scripted) or `yfinance` (live) |
+| `PROVIDER` | backend | `yfinance` (live NSE data) or `replay` (scripted) |
+| `DEMO_CONTROLS` | backend | `true` to allow the demo endpoints (default); independent of `PROVIDER` |
 | `CORS_ORIGINS` | backend | Comma-separated allowed origins (defaults cover the deployed app and local Vite ports) |
 | `PYTHON_VERSION` | Render | Must be `3.11.9` |
 | `VITE_API_BASE` | frontend | Backend base URL |
 
-Demo controls are available only when `PROVIDER=replay` — you cannot
-fast-forward a live market, and that gate is the enforcement.
+## 7.1 Live data, and why the demo still replays
+
+**The deployment runs on live NSE data.** Every 10 minutes the cron ingests
+real prices for all 48 symbols in a single batched request (~3.5s), scores them
+against the real baselines, and emits real events. A representative live cycle:
+
+```
+79.1  SBILIFE.NS    z=+3.4 move | 1.9x avg volume | vs NIFTY +3.4%
+65.1  HDFCLIFE.NS   z=+2.0 move | 2.3x avg volume | vs NIFTY +2.3%
+...
+41 of 47 scored below the bar and stayed out of the digest
+```
+
+The **demo** replays a scripted day through that same pipeline, for two honest
+reasons rather than one convenient one:
+
+1. **NSE is closed most of the time.** Outside 09:15–15:30 IST prices do not
+   move, so a live demo would correctly show nothing — right behaviour, useless
+   demo.
+2. **A spike-and-revert has to be reproducible on camera.** Waiting for a real
+   one is not a plan.
+
+The scenario is not injected data: it fast-forwards the feed's *clock* and the
+detection layer reaches its own conclusions. `PROVIDER` and `DEMO_CONTROLS` are
+independent switches precisely so live data and the demo can coexist — the
+earlier design tied them together, which meant running live silently disabled
+the demo. **Reset** re-ingests immediately, so real prices return the moment a
+demo ends rather than at the next cron tick.
+
+`/diagnostics/live-provider` reports whether the live upstream is reachable
+*from the deployed host* — the replay fallback exists because that can fail,
+not because live data was out of reach.
 
 ---
 

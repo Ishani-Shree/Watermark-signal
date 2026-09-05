@@ -910,6 +910,13 @@ button {
   color: var(--critical);
   background: rgba(208, 59, 59, 0.14);
 }
+
+/* The source contradicted itself for this instant. We kept the first
+   price and say so, rather than silently picking a winner. */
+.badge--conflicting {
+  color: var(--serious);
+  background: rgba(236, 131, 90, 0.16);
+}
 .badge--none {
   color: var(--text-muted);
   background: rgba(125, 124, 119, 0.14);
@@ -923,6 +930,72 @@ button {
   margin-top: 0.9rem;
   padding-top: 0.8rem;
   border-top: 1px solid var(--hairline);
+}
+
+.holding__change {
+  font-size: 0.82rem;
+  font-weight: 650;
+  margin-left: 0.45rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.holding__change--up {
+  color: var(--good);
+}
+
+.holding__change--down {
+  color: var(--critical);
+}
+
+.market-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.9rem;
+  margin-top: 0.7rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--hairline);
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.market-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.market-stat--muted {
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.market-stat__label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.range-bar {
+  position: relative;
+  display: inline-block;
+  width: 62px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.range-bar__dot {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  transform: translate(-50%, -50%);
 }
 
 .note-input {
