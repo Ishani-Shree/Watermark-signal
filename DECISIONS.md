@@ -45,6 +45,20 @@ Format: date/hour, decision, alternative rejected, why.
   of the version-detection path catching it). `bcrypt` itself works fine;
   only passlib's compatibility shim was broken. Direct calls are also just
   simpler -- one less abstraction layer for two functions.
+- **Hour 35-38** — Tests target judgement, not arithmetic. Asserting that
+  `40 * min(z/3, 1)` equals what the same expression computes proves
+  nothing; asserting that a market-wide move is not mistaken for
+  stock-specific news, that a thin-history symbol yields no z-score rather
+  than a garbage one, and that a reason string never claims "vs sector"
+  when it used the NIFTY fallback, tests the decisions that could actually
+  be wrong. Two tests are load-bearing for correctness elsewhere:
+  `source_ts` stability while a price is unchanged (the precondition for
+  dedup) and scenario timestamps never landing in the future (the bug that
+  made events resurface forever). Both are regressions already hit once.
+  No database required -- the valuable logic is pure.
+- **Hour 35-38** — Migrated `Settings` from the deprecated class-based
+  `Config` to `SettingsConfigDict`, clearing the only warning in the suite.
+  A warning nobody clears is a warning nobody reads.
 - **Hour 32-35** — `source_ts` and `fetched_at` are now two genuinely
   different things, closing the idempotency gap logged earlier. `source_ts`
   is when the PRICE is from (the provider's market timestamp) and is the

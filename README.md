@@ -265,6 +265,27 @@ cp .env.example .env             # VITE_API_BASE=http://127.0.0.1:8000
 npm run dev
 ```
 
+### Tests
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+python -m pytest tests/ -q          # 50 tests, ~1s, no database needed
+```
+
+They deliberately cover judgement rather than arithmetic — that a quiet stock
+stays quiet, that a market-wide move is not mistaken for stock-specific news,
+that a missing input degrades instead of crashing, that the reason string never
+overclaims, and that the circuit breaker's half-open probe behaves. Two are
+load-bearing for correctness elsewhere:
+
+- `source_ts` is **stable while a price is unchanged** — the precondition that
+  makes `ON CONFLICT (symbol, source_ts)` a real dedup guarantee. If it drifted,
+  ingestion would silently double-count and nothing else would notice.
+- Replayed scenario timestamps **never land in the future** — a future
+  `source_ts` is never "since you last looked", so the event would resurface on
+  every refresh no matter how many times it was read.
+
 ### Seeing it work
 
 The replay feed's scenario plays out over 65 simulated minutes. Rather than
@@ -298,6 +319,7 @@ fast-forward a live market, and that gate is the enforcement.
 
 ```
 backend/
+  tests/                 50 tests, no database required
   app/
     main.py              routes; ingest + detection cycle
     detection.py         scoring, hysteresis, clustering   (symbol-scoped)
