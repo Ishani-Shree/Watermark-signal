@@ -101,7 +101,37 @@ function App() {
   const handleAdd = (symbol) => mutate(() => api.addToWatchlist(symbol));
   const handleUpdate = (symbol, patch) =>
     mutate(() => api.updateWatchlistItem(symbol, patch));
-  const handleRemove = (symbol) => mutate(() => api.removeFromWatchlist(symbol));
+  /* Remove is one click and takes the note, target and mute settings with
+     it. Rather than block every removal behind a confirm dialog, keep the
+     removed item around briefly so it can be put back exactly as it was --
+     undo beats confirmation for an action people mostly mean. */
+  const [undoItem, setUndoItem] = useState(null);
+
+  async function handleRemove(symbol) {
+    const removed = watchlist.find((i) => i.symbol === symbol);
+    await mutate(() => api.removeFromWatchlist(symbol));
+    if (removed) setUndoItem(removed);
+  }
+
+  async function undoRemove() {
+    const item = undoItem;
+    if (!item) return;
+    setUndoItem(null);
+    await mutate(async () => {
+      await api.addToWatchlist(item.symbol, item.note, item.target_price);
+      // muted_kinds is not part of the add payload, so restore it after.
+      if (item.muted_kinds?.length) {
+        await api.updateWatchlistItem(item.symbol, { muted_kinds: item.muted_kinds });
+      }
+    });
+  }
+
+  // Auto-dismiss, so a stale offer to undo doesn't linger.
+  useEffect(() => {
+    if (!undoItem) return;
+    const timer = setTimeout(() => setUndoItem(null), 10000);
+    return () => clearTimeout(timer);
+  }, [undoItem]);
   const handleToggleMute = (symbol, kind, muted) =>
     mutate(() => api.toggleMute(symbol, kind, muted));
 
@@ -190,6 +220,25 @@ function App() {
         onRemove={handleRemove}
         onToggleMute={handleToggleMute}
       />
+
+      {undoItem && (
+        <div className="toast" role="status">
+          <span>
+            Removed <strong>{undoItem.symbol}</strong>
+          </span>
+          <button type="button" className="toast__action" onClick={undoRemove}>
+            Undo
+          </button>
+          <button
+            type="button"
+            className="toast__dismiss"
+            aria-label="Dismiss"
+            onClick={() => setUndoItem(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }

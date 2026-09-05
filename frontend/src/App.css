@@ -881,10 +881,30 @@ button {
   background: var(--surface-1);
   border: 1px dashed var(--hairline-strong);
   border-radius: var(--radius-md);
-  padding: 2rem 1.5rem;
-  text-align: center;
+  padding: 1.6rem 1.5rem;
   color: var(--text-muted);
-  font-size: 0.92rem;
+  font-size: 0.9rem;
+}
+
+.empty-state__title {
+  color: var(--text-primary);
+  font-weight: 650;
+  font-size: 1rem;
+  margin: 0 0 0.85rem;
+}
+
+.empty-state__steps {
+  margin: 0;
+  padding-left: 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  line-height: 1.5;
+}
+
+.empty-state__steps strong {
+  color: var(--text-secondary);
+  font-weight: 600;
 }
 
 .holding-list {
@@ -1180,4 +1200,192 @@ button {
     align-items: flex-start;
     gap: 0.7rem;
   }
+}
+
+/* ------------------------------------------------------------- Mobile
+   Narrow screens were never exercised during the build: the layout leans
+   on horizontal flex rows (app bar, price beside symbol, demo buttons,
+   sensitivity pills) that have nowhere to go under ~480px. Each one is
+   allowed to stack rather than squeeze, and touch targets are widened. */
+
+@media (max-width: 700px) {
+  .app {
+    padding: 1.25rem 0.9rem 3rem;
+  }
+
+  .app-bar {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 1.75rem;
+  }
+
+  .app-bar__right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  /* Demo controls: label above, buttons on their own full-width row. */
+  .demo-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .demo-bar__actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+
+  .demo-btn {
+    padding: 0.55rem 0.5rem; /* comfortable tap target */
+  }
+
+  .demo-btn--primary {
+    grid-column: 1 / -1;
+  }
+
+  .digest-panel,
+  .event__button,
+  .event__detail,
+  .holding {
+    padding-left: 0.9rem;
+    padding-right: 0.9rem;
+  }
+
+  /* Price under the symbol rather than crushed beside it. */
+  .holding__row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .holding__price {
+    text-align: left;
+    width: 100%;
+  }
+
+  .holding__asof {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .market-row {
+    gap: 0.55rem 0.9rem;
+  }
+
+  /* The 52-week range summary is the least important thing here; let it
+     sit on its own line instead of forcing a horizontal scroll. */
+  .market-stat--muted {
+    margin-left: 0;
+    flex-basis: 100%;
+  }
+
+  .holding__controls {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.8rem;
+  }
+
+  .mute-row {
+    gap: 0.35rem;
+  }
+
+  .mute-chip,
+  .sensitivity__option {
+    padding: 0.4rem 0.65rem; /* >=32px tall for touch */
+  }
+
+  .remove-button {
+    align-self: flex-start;
+    padding: 0.4rem 0.75rem;
+  }
+
+  .sensitivity {
+    gap: 0.35rem;
+  }
+
+  .sensitivity__label {
+    flex-basis: 100%;
+    margin-bottom: 0.15rem;
+  }
+
+  .event__top {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .add-form {
+    flex-direction: column;
+  }
+
+  .add-form button {
+    padding: 0.65rem;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 400px) {
+  .demo-bar__actions {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Undo toast — recovery instead of a confirm dialog on every removal. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.7rem 0.85rem 0.7rem 1.1rem;
+  border-radius: 999px;
+  background: var(--surface-3);
+  border: 1px solid var(--hairline-strong);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  max-width: calc(100vw - 2rem);
+}
+
+.toast strong {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.toast__action {
+  background: none;
+  border: none;
+  color: var(--accent-bright);
+  font-weight: 700;
+  font-size: 0.88rem;
+  cursor: pointer;
+  padding: 0.2rem 0.3rem;
+}
+
+.toast__action:hover {
+  text-decoration: underline;
+}
+
+.toast__dismiss {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.2rem;
+}
+
+.toast__dismiss:hover {
+  color: var(--text-primary);
 }

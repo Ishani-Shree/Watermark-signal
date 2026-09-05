@@ -230,10 +230,23 @@ export default function WatchlistPanel({
         </button>
       </form>
 
+      {/* First run is the only moment a user has no idea what this does.
+          Say what happens next, not just that the list is empty. */}
       {items.length === 0 ? (
-        <p className="empty-state">
-          Nothing watched yet. Add a stock above and your digest starts tracking it.
-        </p>
+        <div className="empty-state">
+          <p className="empty-state__title">Add your first stock to begin.</p>
+          <ol className="empty-state__steps">
+            <li>Pick a stock above — we start tracking it immediately.</li>
+            <li>
+              Come back later. We show only what broke its own pattern, not every
+              price tick.
+            </li>
+            <li>
+              Optional: set a <strong>target price</strong> to be told when it is
+              crossed, or <strong>mute</strong> signals you do not care about.
+            </li>
+          </ol>
+        </div>
       ) : (
         <div className="holding-list">
           {items.map((item) => (

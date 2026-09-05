@@ -53,7 +53,7 @@ export const api = {
     request("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
   getSymbols: () => request("/symbols"),
   getWatchlist: () => request("/watchlist"),
-  addToWatchlist: (symbol, note, target_price) =>
+  addToWatchlist: (symbol, note = null, target_price = null) =>
     request("/watchlist", { method: "POST", body: JSON.stringify({ symbol, note, target_price }) }),
   // A delta, not a whole-array replace -- two devices toggling different
   // signals at once compose instead of clobbering each other.
