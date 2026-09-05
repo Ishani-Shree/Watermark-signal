@@ -230,9 +230,14 @@ build*, which shaped the following.
 - **Latest is derived, never assumed.** "Current price" is always
   `MAX(source_ts)`, so an out-of-order arrival cannot corrupt what downstream
   code reads as current.
-- **Circuit breaker.** Three consecutive failures opens it for 60s; one
-  half-open probe then decides. Without it, a dead upstream means 48 doomed
-  calls *per cycle, every cycle*.
+- **Circuit breaker.** Three consecutive failed ingest cycles opens it for
+  60s; one half-open probe then decides. Note the unit: quotes are fetched in
+  a single batched call per cycle, so one failure *is* one cycle — the breaker
+  trips on the third and the fourth makes no upstream call at all. (Measured:
+  cycles 1–3 fail with the breaker closing on the third; cycle 4 reports
+  `failed=0, breaker_tripped=true`.) Batching already removed the original
+  motivation — 48 doomed calls per cycle — so the breaker now exists to stop
+  calling a provider we already know is down, not to limit fan-out.
 - **Degrade, don't fail over.** When the provider is down we write **nothing**
   and let the last real snapshot age with a visible `stale` badge. Falling back
   to a second source would hand the user a price that did not come from where

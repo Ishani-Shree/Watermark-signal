@@ -269,11 +269,15 @@ Format: date/hour, decision, alternative rejected, why.
   fill a gap.
 - **Hour 28-32** — Circuit breaker on the provider: 3 consecutive failures
   opens it for 60s, then a single half-open probe decides whether to close
-  or re-open. Without it, one dead upstream means 48 doomed HTTP calls per
-  ingest cycle, every cycle -- slow, noisy, and more likely to get the
-  scraper rate-limited into a longer outage. Verified: during a simulated
-  outage the cycle stops after 3 attempts and a second cycle makes zero
-  calls at all.
+  or re-open. Originally this stopped 48 doomed HTTP calls per ingest cycle.
+  **Amended after batching (hour 45+):** quotes are now fetched in ONE call
+  per cycle, so a failure is one cycle rather than 48 -- the breaker trips
+  after three consecutive failed *cycles*, not three calls inside one. That
+  is the more correct unit (it counts upstream calls), but it is a real
+  behaviour change the earlier note got wrong, and it was only caught by
+  running the acceptance test against production rather than trusting the
+  documentation. Re-verified: cycles 1-3 fail and open the breaker on the
+  third; cycle 4 makes zero upstream calls (`failed=0, tripped=true`).
 - **Hour 28-32** — The breaker and chaos switch live in a wrapper that
   `get_provider()` always applies, rather than being something each call
   site opts into. A resilience guard that a code path can forget to use
