@@ -28,25 +28,33 @@ REVERTED_OFF_PEAK_PCT = 0.02
 
 
 def build_digest(conn, user_id: int, now: datetime) -> dict:
+    # Watermark and watchlist in ONE round trip. Measured: the database work
+    # for a digest is ~0.1ms, while a single round trip to a hosted Postgres
+    # costs ~400ms -- so the count of queries, not their cost, is what makes
+    # this endpoint slow. The LEFT JOINs keep a row even when the user has
+    # no watchlist, so the watermark still comes back.
+    #
     # Read the existing watermark BEFORE advancing it -- this is the value
     # everything below diffs against. Advancing first would make every
     # visit look like a first visit.
-    read_state = conn.execute(
-        text("SELECT last_viewed_at FROM read_state WHERE user_id = :uid"),
-        {"uid": user_id},
-    ).mappings().first()
-    watermark_ts = read_state["last_viewed_at"] if read_state else None
-
-    watchlist_rows = conn.execute(
+    rows = conn.execute(
         text(
-            "SELECT symbol, muted_kinds, target_price, note FROM watchlist_items WHERE user_id = :uid"
+            """
+            SELECT r.last_viewed_at AS watermark,
+                   w.symbol, w.muted_kinds, w.target_price, w.note
+            FROM (SELECT CAST(:uid AS bigint) AS uid) u
+            LEFT JOIN read_state r ON r.user_id = u.uid
+            LEFT JOIN watchlist_items w ON w.user_id = u.uid
+            """
         ),
         {"uid": user_id},
     ).mappings().all()
 
-    _advance_watermark(conn, user_id, now)
+    watermark_ts = rows[0]["watermark"] if rows else None
+    watchlist_rows = [r for r in rows if r["symbol"] is not None]
 
     if not watchlist_rows:
+        _advance_watermark(conn, user_id, now)
         return {
             "mode": "empty_watchlist",
             "gap_minutes": None,
@@ -69,44 +77,57 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
         lookback_start = watermark_ts
         is_long_gap = gap_minutes > SHORT_GAP_MINUTES
 
-    events = conn.execute(
+    # Second and final round trip: the events, each symbol's current price,
+    # and the watermark advance -- together. The advance rides along as a
+    # data-modifying CTE because it must happen on every read anyway, and a
+    # write that needs no result should not cost its own trip.
+    #
+    # Current price is joined per event rather than fetched for the whole
+    # watchlist: only symbols WITH events ever need it, and a 40-symbol
+    # watchlist with one event was previously fetching 39 prices to discard.
+    event_rows = conn.execute(
         text(
             """
-            SELECT symbol, kind, score, reason_text, first_seen_ts, last_updated_ts,
-                   peak_price, trough_price
-            FROM events
-            WHERE symbol = ANY(:symbols) AND last_updated_ts >= :lookback_start
-            ORDER BY score DESC
+            WITH advance AS (
+                INSERT INTO read_state (user_id, last_viewed_at)
+                VALUES (:uid, :now)
+                ON CONFLICT (user_id) DO UPDATE
+                    SET last_viewed_at = GREATEST(read_state.last_viewed_at, EXCLUDED.last_viewed_at)
+            )
+            SELECT e.symbol, e.kind, e.score, e.reason_text,
+                   e.first_seen_ts, e.last_updated_ts, e.peak_price, e.trough_price,
+                   latest.price AS current_price
+            FROM events e
+            LEFT JOIN LATERAL (
+                SELECT price FROM snapshots
+                WHERE snapshots.symbol = e.symbol
+                ORDER BY source_ts DESC LIMIT 1
+            ) latest ON true
+            WHERE e.symbol = ANY(:symbols) AND e.last_updated_ts >= :lookback_start
+            ORDER BY e.score DESC
             """
         ),
-        {"symbols": symbols, "lookback_start": lookback_start},
+        {
+            "uid": user_id,
+            "now": now,
+            "symbols": symbols,
+            "lookback_start": lookback_start,
+        },
     ).mappings().all()
 
     def is_muted(row):
         muted = watchlist_by_symbol[row["symbol"]]["muted_kinds"] or []
         return row["kind"] in muted
 
-    events = [e for e in events if not is_muted(e)]
+    events = [e for e in event_rows if not is_muted(e)]
 
-    # The revert story needs where the price is NOW, not just where the
-    # event peaked -- "peaked 1639.60, now back at 1562" is the whole
-    # point (BUILD_PLAN.md section 6).
-    latest_prices = dict(
-        conn.execute(
-            text(
-                """
-                SELECT s.symbol, latest.price
-                FROM unnest(CAST(:symbols AS text[])) AS s(symbol)
-                JOIN LATERAL (
-                    SELECT price FROM snapshots
-                    WHERE snapshots.symbol = s.symbol
-                    ORDER BY source_ts DESC LIMIT 1
-                ) latest ON true
-                """
-            ),
-            {"symbols": symbols},
-        ).all()
-    )
+    # Current price came back joined to each event above. The revert story
+    # needs where the price is NOW, not just where the event peaked --
+    # "peaked 1639.60, now back at 1562" is the whole point
+    # (BUILD_PLAN.md section 6).
+    latest_prices = {
+        e["symbol"]: e["current_price"] for e in events if e["current_price"] is not None
+    }
 
     mode = "long_gap" if is_long_gap else "short_gap"
 

@@ -46,6 +46,11 @@ CREATE TABLE events (
 );
 CREATE INDEX idx_events_symbol_ts ON events (symbol, first_seen_ts);
 CREATE INDEX idx_events_cluster ON events (symbol, cluster_key);
+-- The digest's hot path filters on last_updated_ts, not first_seen_ts: an
+-- event that is still being extended must keep surfacing. Indexing the
+-- column the query actually uses (Postgres ignores both while the table is
+-- small, and will need this one when it is not).
+CREATE INDEX idx_events_symbol_updated ON events (symbol, last_updated_ts);
 
 CREATE TABLE users (
     id            BIGSERIAL PRIMARY KEY,

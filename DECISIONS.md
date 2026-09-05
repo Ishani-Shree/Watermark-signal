@@ -45,6 +45,26 @@ Format: date/hour, decision, alternative rejected, why.
   of the version-detection path catching it). `bcrypt` itself works fine;
   only passlib's compatibility shim was broken. Direct calls are also just
   simpler -- one less abstraction layer for two functions.
+- **Hour 32-35** — Load-tested the read path at 10,000 watchlist items
+  (500 users x 20 symbols) and found the bottleneck was not where the
+  README had assumed. The digest's own SQL executes in **0.13 ms**; a
+  single round trip to Neon costs **~400 ms**. The endpoint was making
+  five. Collapsed to two -- watermark and watchlist via LEFT JOINs in one,
+  and events + current price + the watermark advance in another (the
+  advance rides as a data-modifying CTE, since a write needing no result
+  should not cost its own trip). Median digest latency 2,173 ms -> 1,333 ms.
+  The lesson worth keeping: profiling said "round trips", and any time
+  spent tuning the queries themselves would have bought nothing.
+- **Hour 32-35** — Current price is now joined per *event* rather than
+  fetched for the whole watchlist. Only symbols with events ever need it,
+  so a 40-symbol watchlist with one event was fetching 39 prices to throw
+  away.
+- **Hour 32-35** — Added `idx_events_symbol_updated (symbol,
+  last_updated_ts)`. The existing index was on `first_seen_ts`, which the
+  digest never filters on -- it filters on `last_updated_ts`, because an
+  event still being extended must keep surfacing. Postgres correctly
+  seq-scans at current table size, which is exactly why this would have
+  gone unnoticed until the table was large enough to hurt.
 - **Hour 38-42** — CORS narrowed from `allow_origins=["*"]` to an explicit
   list plus an anchored regex for Cloudflare Pages preview subdomains
   (which get random names and cannot be enumerated ahead of time). The

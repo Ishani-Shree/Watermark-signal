@@ -150,8 +150,20 @@ hard and is now easing off is still described by what made it significant.
   database the round trip, not the insert, is what grows with watchlist size.
   Measured: the full 8-step replay scenario runs in **13.5s at 48 symbols —
   the same as at 11 symbols.**
-- **The read path is a single indexed query** per digest
-  (`events (symbol, first_seen_ts)`, `snapshots (symbol, source_ts DESC)`).
+- **The read path is two round trips, not five.** Load-tested at 500 users ×
+  20 symbols = **10,000 watchlist items**. The finding that mattered: the
+  database work for a digest is **~0.13 ms**, while a single round trip to a
+  hosted Postgres costs **~400 ms** — so the *number* of queries, not their
+  cost, was the entire latency budget. Collapsing five queries into two
+  (watermark+watchlist in one; events, current price and the watermark
+  advance in another, via a data-modifying CTE) cut median digest latency
+  from **2,173 ms to 1,333 ms**. Optimising the SQL would have been wasted
+  effort; the profile said round trips.
+- **Indexed on the column the query actually uses.** The hot filter is
+  `last_updated_ts` (an event still being extended must keep surfacing), but
+  the original index was on `first_seen_ts`. Postgres ignores both at current
+  table size and correctly seq-scans; the index matters at scale, and a
+  mismatched one would have looked fine right up until it didn't.
 - **Ingestion is decoupled from readers.** Users never trigger a provider fetch;
   the cron does. Traffic spikes cost reads, not upstream calls.
 
