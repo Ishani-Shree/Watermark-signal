@@ -59,15 +59,25 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
     watermark_ts = rows[0]["watermark"] if rows else None
     watchlist_rows = [r for r in rows if r["symbol"] is not None]
 
+    # Clock skew: a watermark ahead of now would make lookback_start a future
+    # instant, so `last_updated_ts >= lookback_start` matches nothing and the
+    # digest reports "still quiet" forever. And because the advance is
+    # GREATEST(...), the bad value can never be written back down -- the user
+    # would be stuck until wall-clock caught up. Treat it as no watermark at
+    # all. (BUILD_PLAN.md section 10 names this edge case.)
+    if watermark_ts is not None and watermark_ts > now:
+        watermark_ts = None
+
     if not watchlist_rows:
-        _advance_watermark(conn, user_id, now)
         return {
             "mode": "empty_watchlist",
             "gap_minutes": None,
             "events": [],
             "suppressed_count": 0,
+            "muted_count": 0,
             "watched_count": 0,
             "flagged_count": 0,
+            "cursor": now.isoformat(),
         }
 
     watchlist_by_symbol = {row["symbol"]: row for row in watchlist_rows}
@@ -83,10 +93,9 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
         lookback_start = watermark_ts
         is_long_gap = gap_minutes > SHORT_GAP_MINUTES
 
-    # Second and final round trip: the events, each symbol's current price,
-    # and the watermark advance -- together. The advance rides along as a
-    # data-modifying CTE because it must happen on every read anyway, and a
-    # write that needs no result should not cost its own trip.
+    # Second and final round trip: the events plus each symbol's current
+    # price. Reading is now side-effect free -- see the module docstring on
+    # why the watermark advance moved to an explicit ack.
     #
     # Current price is joined per event rather than fetched for the whole
     # watchlist: only symbols WITH events ever need it, and a 40-symbol
@@ -94,15 +103,9 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
     event_rows = conn.execute(
         text(
             """
-            WITH advance AS (
-                INSERT INTO read_state (user_id, last_viewed_at)
-                VALUES (:uid, :now)
-                ON CONFLICT (user_id) DO UPDATE
-                    SET last_viewed_at = GREATEST(read_state.last_viewed_at, EXCLUDED.last_viewed_at)
-            )
             SELECT e.symbol, e.kind, e.score, e.reason_text,
                    e.first_seen_ts, e.last_updated_ts, e.peak_price, e.trough_price,
-                   latest.price AS current_price
+                   e.direction, latest.price AS current_price
             FROM events e
             LEFT JOIN LATERAL (
                 SELECT price FROM snapshots
@@ -114,8 +117,6 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
             """
         ),
         {
-            "uid": user_id,
-            "now": now,
             "symbols": symbols,
             "lookback_start": lookback_start,
         },
@@ -126,6 +127,10 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
         return row["kind"] in muted
 
     events = [e for e in event_rows if not is_muted(e)]
+    # Counted, not just dropped. Reporting a silenced stock as one that
+    # "stayed quiet" is a lie, and honesty about what was filtered is the
+    # entire pitch of this product.
+    muted_symbols = {e["symbol"] for e in event_rows if is_muted(e)}
 
     # Current price came back joined to each event above. The revert story
     # needs where the price is NOW, not just where the event peaked --
@@ -144,12 +149,21 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
     for e in events:
         by_symbol.setdefault(e["symbol"], []).append(e)
 
+    # Every symbol that actually produced a signal, counted BEFORE the
+    # long-gap threshold trims the list. Counting after would report a stock
+    # that genuinely fired -- just below the raised bar -- as one that
+    # "stayed quiet", which is the same lie as the muted case.
+    fired_symbols = set(by_symbol)
+    below_bar = 0
+
     candidates = []
     for symbol, symbol_events in by_symbol.items():
         if is_long_gap or _has_reverted(symbol_events, latest_prices.get(symbol)):
             summary = _aggregate_by_symbol(symbol_events, latest_prices)
             if is_long_gap:
-                summary = [s for s in summary if s["score"] >= LONG_GAP_RAISE_THRESHOLD]
+                kept = [s for s in summary if s["score"] >= LONG_GAP_RAISE_THRESHOLD]
+                below_bar += len(summary) - len(kept)
+                summary = kept
             candidates.extend(summary)
         else:
             candidates.extend(
@@ -165,23 +179,29 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
                 for e in symbol_events
             )
 
-    candidates.extend(
-        _target_crossings(conn, watchlist_rows, lookback_start, is_first_visit)
-    )
+    crossings = _target_crossings(conn, watchlist_rows, lookback_start)
+    candidates.extend(crossings)
+    fired_symbols.update(c["symbol"] for c in crossings)
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
     surfaced = candidates[:DIGEST_CAP]
-    suppressed_count = max(0, len(candidates) - DIGEST_CAP)
+    suppressed_count = max(0, len(candidates) - DIGEST_CAP) + below_bar
 
     return {
         "mode": mode,
         "gap_minutes": gap_minutes,
         "events": surfaced,
         "suppressed_count": suppressed_count,
+        # Silenced by the user, not silent on its own. Kept distinct from
+        # suppressed_count so the UI never calls a muted stock "quiet".
+        "muted_count": len(muted_symbols),
         # Restraint is only visible against the size of what was checked:
         # "1 of 40" says something that a bare event count cannot.
         "watched_count": len(watchlist_rows),
-        "flagged_count": len({c["symbol"] for c in candidates}),
+        "flagged_count": len(fired_symbols),
+        # The instant this digest reflects. The client acks this value, so a
+        # signal arriving mid-render is not skipped over.
+        "cursor": now.isoformat(),
     }
 
 
@@ -204,7 +224,7 @@ def classify_crossing(
     return None
 
 
-def _target_crossings(conn, watchlist_rows, lookback_start, is_first_visit) -> list[dict]:
+def _target_crossings(conn, watchlist_rows, lookback_start) -> list[dict]:
     """Surface a target price the stock has crossed since the last visit.
 
     Costs a round trip only for users who actually set a target -- the
@@ -301,17 +321,40 @@ def _target_crossings(conn, watchlist_rows, lookback_start, is_first_visit) -> l
 
 
 def _has_reverted(symbol_events, current_price) -> bool:
-    """True when the price has fallen back meaningfully from the peak the
-    event recorded -- i.e. the move happened and came back."""
+    """True when the price has come back meaningfully from the extreme the
+    event reached -- i.e. the move happened and undid itself.
+
+    Direction matters, and peak/trough alone cannot supply it: a rise still
+    running sits at its peak and far above its trough, and so does a fall
+    that has fully recovered. Without the recorded direction, checking both
+    ends would flag every healthy rally as "reverted". So an upward move is
+    judged against its peak, a downward one against its trough.
+    """
     if current_price is None:
         return False
+    current = float(current_price)
+
+    # Any constituent event opening downward makes this a down move.
+    went_down = any(e.get("direction") == "down" for e in symbol_events)
+
+    if went_down:
+        troughs = [
+            float(e["trough_price"]) for e in symbol_events if e["trough_price"] is not None
+        ]
+        if not troughs:
+            return False
+        trough = min(troughs)
+        if trough <= 0:
+            return False
+        return (current - trough) / trough >= REVERTED_OFF_PEAK_PCT
+
     peaks = [float(e["peak_price"]) for e in symbol_events if e["peak_price"] is not None]
     if not peaks:
         return False
     peak = max(peaks)
     if peak <= 0:
         return False
-    return (float(current_price) - peak) / peak <= -REVERTED_OFF_PEAK_PCT
+    return (current - peak) / peak <= -REVERTED_OFF_PEAK_PCT
 
 
 def _aggregate_by_symbol(events, latest_prices: dict[str, float]) -> list[dict]:
@@ -369,7 +412,6 @@ def _aggregate_by_symbol(events, latest_prices: dict[str, float]) -> list[dict]:
             reverted = off_peak <= -REVERTED_OFF_PEAK_PCT
         count = agg["event_count"]
         parts.append(f"{count} event{'' if count == 1 else 's'} while away")
-        parts.append(f"last active {agg['last_updated_ts'].strftime('%H:%M')}")
 
         results.append(
             {
@@ -389,10 +431,23 @@ def _aggregate_by_symbol(events, latest_prices: dict[str, float]) -> list[dict]:
     return results
 
 
+def acknowledge(conn, user_id: int, cursor: datetime, now: datetime) -> None:
+    """Mark the digest as read, up to the instant it described.
+
+    Split out from build_digest because reading must be side-effect free: a
+    GET that advances the watermark consumes itself on any double fetch --
+    React StrictMode's double-invoke, a retry, a second tab -- and the
+    second, empty response is the one that lands on screen.
+
+    Advancing to the digest's own cursor rather than to `now` means a signal
+    that arrived between rendering and acknowledging is not silently skipped.
+    """
+    _advance_watermark(conn, user_id, min(cursor, now))
+
+
 def _advance_watermark(conn, user_id: int, now: datetime) -> None:
     """Monotonic: two devices reading concurrently only ever move this
-    forward, never backward. Must be called AFTER build_digest has already
-    read the prior watermark value -- see the ordering note there."""
+    forward, never backward."""
     conn.execute(
         text(
             """

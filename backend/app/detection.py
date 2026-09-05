@@ -198,9 +198,10 @@ def upsert_event(conn, now: datetime, price: float, score: ScoreResult) -> str |
                 """
                 INSERT INTO events
                     (symbol, kind, score, reason_text, first_seen_ts, last_updated_ts,
-                     cluster_key, peak_price, trough_price)
+                     cluster_key, peak_price, trough_price, direction)
                 VALUES
-                    (:symbol, :kind, :score, :reason, :now, :now, :cluster_key, :price, :price)
+                    (:symbol, :kind, :score, :reason, :now, :now, :cluster_key,
+                     :price, :price, :direction)
                 """
             ),
             {
@@ -211,6 +212,8 @@ def upsert_event(conn, now: datetime, price: float, score: ScoreResult) -> str |
                 "now": now,
                 "cluster_key": cluster_key,
                 "price": price,
+                # Recorded at open, when the sign of the move is unambiguous.
+                "direction": "down" if score.pct_change < 0 else "up",
             },
         )
         return cluster_key

@@ -45,6 +45,58 @@ Format: date/hour, decision, alternative rejected, why.
   of the version-detection path catching it). `bcrypt` itself works fine;
   only passlib's compatibility shim was broken. Direct calls are also just
   simpler -- one less abstraction layer for two functions.
+- **Hour 42-45 (audit)** — `POST /demo/reset` and `POST /demo/chaos` were
+  reachable **unauthenticated**. Being gated to the replay provider is not a
+  security control: the deployed instance *runs* on the replay feed, so the
+  gate was open. Anyone with the public URL could `DELETE FROM events` and
+  `DELETE FROM snapshots`, then pin the provider into a permanent simulated
+  outage so the cron never refilled it. Both now require a logged-in caller.
+  The lesson: a flag that describes an environment is not a permission check.
+- **Hour 42-45 (audit)** — `GET /digest` used to advance the read watermark,
+  which made *reading consume itself*: React StrictMode double-invokes mount
+  effects, so the first call marked everything read and the second returned
+  empty -- and the empty one is what reached the screen. Any retry or second
+  tab did the same. Reading is now side-effect free and the client sends an
+  explicit `POST /digest/ack` carrying the cursor the digest reported, so a
+  signal arriving between render and ack is not skipped. A GET that mutates
+  is not merely impure here; it silently destroys the product's core screen.
+- **Hour 42-45 (audit)** — A watermark in the future (clock skew) was
+  unrecoverable: `lookback_start` became a future instant so nothing matched,
+  and the `GREATEST(...)` advance meant the bad value could never be written
+  back down. The user would see "still quiet" until wall-clock caught up.
+  Now clamped -- a future watermark is treated as no watermark. This is the
+  exact edge case BUILD_PLAN.md section 10 names, and it was unhandled.
+- **Hour 42-45 (audit)** — Muted stocks were counted as ones that "stayed
+  quiet". They were not quiet; the user silenced them. `muted_count` is now
+  reported separately and the copy says so. In a product whose entire pitch
+  is honest filtering, misreporting its own filtering is the worst class of
+  bug it can have. The same error applied to symbols dropped by the long-gap
+  threshold, which are now counted before the trim, not after.
+- **Hour 42-45 (audit)** — Revert detection was peak-only, so a stock that
+  crashed and recovered was never flagged and kept a "breaking 52-week low"
+  headline after the price came back. Naive symmetry does not work: a rally
+  still running also sits far above its trough. It needs the move's
+  direction, which was not stored -- so `events.direction` is recorded at
+  open, when the sign is unambiguous, and an up move is judged against its
+  peak, a down move against its trough.
+- **Hour 42-45 (audit)** — Input validation: email format, password 8-72
+  bytes (bcrypt *raises* past 72, so an over-long password was a 500 rather
+  than a 422), bounded note/target, and `muted_kinds` restricted to known
+  kinds instead of an arbitrary string array the client could write anything
+  into.
+- **Hour 42-45 (audit)** — Rate limiting on `/auth/*`: 10 requests per
+  minute per IP, in-process. Without it, `/auth/login` is an unlimited
+  password oracle where every guess costs a bcrypt hash -- a brute-force
+  vector and a cheap way to exhaust a small instance's CPU. The honest
+  limitation, written in the module: an in-process counter is only accurate
+  because the deployment runs a single worker; past that it belongs in Redis
+  or at the edge.
+- **Hour 42-45 (audit)** — Startup refuses to run in production with the
+  development JWT secret. Verified the live deployment was already
+  configured correctly (a token forged with the default was rejected), but
+  the default is published in this repo, so a future deploy that forgot the
+  env var would have silently accepted forged tokens for any account. It
+  now fails loudly instead.
 - **Hour 42-45** — Finished `target_price`, which had been stored, read and
   passed around while doing nothing. A half-built feature reads as poor
   scoping (BUILD_PLAN.md section 11), so the choice was wire it up or delete

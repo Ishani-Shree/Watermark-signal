@@ -15,51 +15,71 @@ function App() {
   const [symbols, setSymbols] = useState([]);
   const [health, setHealth] = useState(null);
 
-  async function refreshAll() {
+  const [actionError, setActionError] = useState(null);
+
+  // A 401 anywhere clears the token; drop straight back to the login form
+  // rather than stranding the user on an error screen.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setAuthed(false);
+      setDigest(null);
+      setWatchlist([]);
+    };
+    window.addEventListener("watermark:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("watermark:unauthorized", onUnauthorized);
+  }, []);
+
+  async function refreshAll({ ack = false } = {}) {
     setDigestLoading(true);
     setDigestError(null);
-    try {
-      const [digestResult, watchlistResult, symbolsResult, healthResult] =
-        await Promise.all([
-          api.getDigest(),
-          api.getWatchlist(),
-          api.getSymbols(),
-          api.getHealth(),
-        ]);
-      setDigest(digestResult);
-      setWatchlist(watchlistResult.items);
-      setSymbols(symbolsResult.symbols);
-      setHealth(healthResult);
-    } catch (err) {
-      setDigestError(err.message);
-    } finally {
-      setDigestLoading(false);
+    // Settled, not all: a failing /symbols call must not discard a perfectly
+    // good digest and show "couldn't load your digest".
+    const [digestResult, watchlistResult, symbolsResult, healthResult] =
+      await Promise.allSettled([
+        api.getDigest(),
+        api.getWatchlist(),
+        api.getSymbols(),
+        api.getHealth(),
+      ]);
+
+    if (digestResult.status === "fulfilled") {
+      setDigest(digestResult.value);
+      // Reading is side-effect free, so mark it read explicitly -- and only
+      // on a genuine user-facing refresh, never on a background one.
+      if (ack && digestResult.value.cursor) {
+        api.ackDigest(digestResult.value.cursor).catch(() => {});
+      }
+    } else {
+      setDigestError(digestResult.reason.message);
     }
+    if (watchlistResult.status === "fulfilled") setWatchlist(watchlistResult.value.items);
+    if (symbolsResult.status === "fulfilled") setSymbols(symbolsResult.value.symbols);
+    if (healthResult.status === "fulfilled") setHealth(healthResult.value);
+
+    setDigestLoading(false);
   }
 
   useEffect(() => {
-    if (authed) refreshAll();
+    if (authed) refreshAll({ ack: true });
   }, [authed]);
 
-  async function refreshWatchlistOnly() {
-    const result = await api.getWatchlist();
-    setWatchlist(result.items);
+  /* Mutations change the digest too -- watched_count, the muted set and
+     target-derived events all live there -- so refresh both. Without ack:
+     changing a mute should not mark unseen signals as read. */
+  async function mutate(action) {
+    setActionError(null);
+    try {
+      await action();
+      await refreshAll();
+    } catch (err) {
+      setActionError(err.message);
+    }
   }
 
-  async function handleAdd(symbol) {
-    await api.addToWatchlist(symbol);
-    await refreshWatchlistOnly();
-  }
-
-  async function handleUpdate(symbol, patch) {
-    await api.updateWatchlistItem(symbol, patch);
-    await refreshWatchlistOnly();
-  }
-
-  async function handleRemove(symbol) {
-    await api.removeFromWatchlist(symbol);
-    await refreshWatchlistOnly();
-  }
+  const handleAdd = (symbol) => mutate(() => api.addToWatchlist(symbol));
+  const handleUpdate = (symbol, patch) =>
+    mutate(() => api.updateWatchlistItem(symbol, patch));
+  const handleRemove = (symbol) => mutate(() => api.removeFromWatchlist(symbol));
 
   function logout() {
     clearToken();
@@ -107,8 +127,10 @@ function App() {
       </header>
 
       {sourceMode === "replay" && (
-        <DemoControls onComplete={refreshAll} degraded={degraded} />
+        <DemoControls onComplete={() => refreshAll()} degraded={degraded} />
       )}
+
+      {actionError && <div className="degraded-banner">{actionError}</div>}
 
       {degraded && (
         <div className="degraded-banner">

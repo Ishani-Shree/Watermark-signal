@@ -198,6 +198,11 @@ export default function DigestPanel({ digest, loading, error }) {
   if (!digest) return null;
 
   const hasEvents = digest.events.length > 0;
+  // Genuinely silent: not flagged, and not silenced by the user either.
+  const quietCount = Math.max(
+    0,
+    digest.watched_count - digest.flagged_count - (digest.muted_count || 0)
+  );
 
   return (
     <section className="digest">
@@ -241,8 +246,13 @@ export default function DigestPanel({ digest, loading, error }) {
           {/* The noun agrees with watched_count ("1 of 3 watched stocks"),
               not with flagged_count. */}
           {digest.watched_count === 1 ? " watched stock broke pattern." : " watched stocks broke pattern."}
-          {digest.watched_count - digest.flagged_count > 0 &&
-            ` The other ${digest.watched_count - digest.flagged_count} stayed quiet — checked, scored, and not worth showing.`}
+          {/* Stocks the user silenced are NOT stocks that stayed quiet.
+              Counting them as quiet would be the product lying about its
+              own filtering. */}
+          {quietCount > 0 &&
+            ` The other ${quietCount} stayed quiet — checked, scored, and not worth showing.`}
+          {digest.muted_count > 0 &&
+            ` ${digest.muted_count} had signals you've muted.`}
           {digest.suppressed_count > 0 &&
             ` ${digest.suppressed_count} ranked below the cut.`}
         </p>

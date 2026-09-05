@@ -42,7 +42,11 @@ CREATE TABLE events (
     last_updated_ts TIMESTAMPTZ NOT NULL,
     cluster_key     TEXT NOT NULL,
     peak_price      NUMERIC,
-    trough_price    NUMERIC
+    trough_price    NUMERIC,
+    -- Which way the move went when the event opened. Peak and trough alone
+    -- cannot tell a rise that is still running from a fall that recovered:
+    -- in both cases the price sits far from one extreme and near the other.
+    direction       TEXT NOT NULL DEFAULT 'up'  -- 'up' | 'down'
 );
 CREATE INDEX idx_events_symbol_ts ON events (symbol, first_seen_ts);
 CREATE INDEX idx_events_cluster ON events (symbol, cluster_key);

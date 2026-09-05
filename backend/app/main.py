@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -11,9 +11,10 @@ from .config import settings
 from .db import engine
 from .detection import compute_score, upsert_event
 from .provider_health import ProviderUnavailable, health
+from .ratelimit import rate_limit_auth
 from .providers import get_provider
 from .providers import replay_provider as replay_clock
-from .ranking import build_digest
+from .ranking import acknowledge, build_digest
 
 app = FastAPI(title="Watermark API")
 
@@ -38,26 +39,60 @@ app.add_middleware(
 INDEX_SYMBOLS = {"^NSEI"}
 
 
+MUTABLE_KINDS = {"z_move", "vol_spike", "relative_move", "level_breach", "target_hit"}
+
+# bcrypt hashes at most 72 BYTES and raises beyond that -- so an over-long
+# password is a 422 from validation, never a 500 from the hashing library.
+MAX_PASSWORD_BYTES = 72
+EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
 class SignupRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=3, max_length=254, pattern=EMAIL_PATTERN)
+    password: str = Field(min_length=8, max_length=MAX_PASSWORD_BYTES)
+
+    @field_validator("password")
+    @classmethod
+    def fits_bcrypt(cls, value: str) -> str:
+        # Length in characters is not length in bytes once non-ASCII is in
+        # play; bcrypt counts bytes.
+        if len(value.encode("utf-8")) > MAX_PASSWORD_BYTES:
+            raise ValueError(f"password must be at most {MAX_PASSWORD_BYTES} bytes")
+        return value
 
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class WatchlistAddRequest(BaseModel):
-    symbol: str
-    note: str | None = None
-    target_price: float | None = None
+    symbol: str = Field(min_length=1, max_length=32)
+    note: str | None = Field(default=None, max_length=280)
+    target_price: float | None = Field(default=None, gt=0, lt=1e9)
+
+
+class DigestAckRequest(BaseModel):
+    cursor: datetime | None = None
 
 
 class WatchlistUpdateRequest(BaseModel):
-    note: str | None = None
-    target_price: float | None = None
-    muted_kinds: list[str] | None = None
+    note: str | None = Field(default=None, max_length=280)
+    target_price: float | None = Field(default=None, gt=0, lt=1e9)
+    muted_kinds: list[str] | None = Field(default=None, max_length=len(MUTABLE_KINDS))
+
+    @field_validator("muted_kinds")
+    @classmethod
+    def known_kinds_only(cls, value: list[str] | None) -> list[str] | None:
+        """Without this, `muted_kinds` is an arbitrary string array the
+        client can write anything into -- unbounded junk in the database
+        that silently mutes nothing."""
+        if value is None:
+            return None
+        unknown = set(value) - MUTABLE_KINDS
+        if unknown:
+            raise ValueError(f"unknown signal kinds: {sorted(unknown)}")
+        return sorted(set(value))
 
 
 @app.get("/")
@@ -90,7 +125,7 @@ def health_check():
 
 
 @app.post("/demo/chaos")
-def demo_chaos(enabled: bool):
+def demo_chaos(enabled: bool, user_id: int = Depends(get_current_user_id)):
     """Flip the upstream provider into a simulated outage. Exists so the
     degraded path can be demonstrated deliberately (BUILD_PLAN.md section
     13, step 4) instead of hoping Yahoo misbehaves during the demo."""
@@ -342,9 +377,15 @@ def demo_run_scenario(user_id: int = Depends(get_current_user_id)):
 
 
 @app.post("/demo/reset")
-def demo_reset():
+def demo_reset(user_id: int = Depends(get_current_user_id)):
     """Clear all detected events and snapshots so a scenario can be re-run
-    from a clean slate. Leaves users, watchlists and baselines intact."""
+    from a clean slate. Leaves users, watchlists and baselines intact.
+
+    Requires a logged-in caller. Being gated to the replay feed is NOT a
+    security control -- the deployed instance runs on the replay feed, so
+    without authentication anyone holding the public URL could wipe the
+    data this endpoint deletes.
+    """
     _require_replay_provider()
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM events"))
@@ -404,7 +445,7 @@ def list_symbols():
     return {"symbols": [dict(r) for r in rows]}
 
 
-@app.post("/auth/signup")
+@app.post("/auth/signup", dependencies=[Depends(rate_limit_auth)])
 def signup(body: SignupRequest):
     with engine.begin() as conn:
         try:
@@ -419,7 +460,7 @@ def signup(body: SignupRequest):
     return {"access_token": create_access_token(row["id"]), "token_type": "bearer"}
 
 
-@app.post("/auth/login")
+@app.post("/auth/login", dependencies=[Depends(rate_limit_auth)])
 def login(body: LoginRequest):
     with engine.connect() as conn:
         row = conn.execute(
@@ -508,6 +549,11 @@ def update_watchlist_item(
     if not fields:
         return {"ok": True}
 
+    # Column names are interpolated into SQL, so they must never come from
+    # user input. They are literals above, but assert it: a later edit that
+    # builds `fields` from a request body would otherwise turn this into an
+    # injection point silently.
+    assert set(fields) <= {"note", "target_price", "muted_kinds"}
     set_clause = ", ".join(f"{k} = :{k}" for k in fields)
     with engine.begin() as conn:
         result = conn.execute(
@@ -537,7 +583,29 @@ def digest(user_id: int = Depends(get_current_user_id)):
     detection layer's events against this user's watchlist, applies mute
     settings, and applies time-scaled materiality -- individual events for
     a short gap since last visit, an aggregated peak/trough/event-count
-    path summary for a long one. Also advances this user's read watermark."""
+    path summary for a long one.
+
+    Side-effect free. Marking the digest read is a separate POST to
+    /digest/ack -- a GET that advanced the watermark consumed itself on any
+    double fetch (a StrictMode double-invoke, a retry, a second tab), and
+    the second, empty response was the one that reached the screen.
+    """
     now = datetime.now(timezone.utc)
-    with engine.begin() as conn:
+    with engine.connect() as conn:
         return build_digest(conn, user_id, now)
+
+
+@app.post("/digest/ack")
+def digest_ack(body: DigestAckRequest, user_id: int = Depends(get_current_user_id)):
+    """Mark the digest read, up to the instant the client actually saw.
+
+    Advancing to the client's cursor rather than to `now` means a signal
+    that arrived between rendering and acknowledging is not skipped over.
+    """
+    now = datetime.now(timezone.utc)
+    cursor = body.cursor or now
+    if cursor.tzinfo is None:
+        cursor = cursor.replace(tzinfo=timezone.utc)
+    with engine.begin() as conn:
+        acknowledge(conn, user_id, cursor, now)
+    return {"ok": True}

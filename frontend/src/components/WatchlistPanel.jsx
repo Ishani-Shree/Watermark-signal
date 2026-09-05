@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const MUTABLE_KINDS = [
   { key: "z_move", label: "volatility" },
@@ -35,7 +35,14 @@ function freshness(item) {
 }
 
 function Holding({ item, onUpdate, onRemove }) {
-  const muted = new Set(item.muted_kinds || []);
+  /* Held locally, not derived from props on every render. PATCH replaces the
+     whole muted_kinds array, so two quick toggles both computed from the
+     same stale prop would make the second silently undo the first. */
+  const [muted, setMuted] = useState(() => new Set(item.muted_kinds || []));
+  useEffect(() => {
+    setMuted(new Set(item.muted_kinds || []));
+  }, [item.muted_kinds]);
+
   const state = freshness(item);
   const [target, setTarget] = useState(
     item.target_price != null ? String(item.target_price) : ""
@@ -46,6 +53,7 @@ function Holding({ item, onUpdate, onRemove }) {
     const next = new Set(muted);
     if (next.has(kind)) next.delete(kind);
     else next.add(kind);
+    setMuted(next); // optimistic, so a fast second click builds on the first
     onUpdate(item.symbol, { muted_kinds: Array.from(next) });
   }
 

@@ -16,7 +16,19 @@ async function request(path, options = {}) {
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(body.detail || `Request failed: ${res.status}`);
+    // An expired or invalid token must clear itself, or the app parks on an
+    // error screen with no way back to the login form.
+    if (res.status === 401) {
+      clearToken();
+      window.dispatchEvent(new Event("watermark:unauthorized"));
+    }
+    const detail =
+      typeof body.detail === "string"
+        ? body.detail
+        : Array.isArray(body.detail)
+          ? body.detail.map((d) => d.msg).join("; ") // FastAPI validation errors
+          : `Request failed: ${res.status}`;
+    throw new Error(detail);
   }
   return body;
 }
@@ -48,6 +60,8 @@ export const api = {
   removeFromWatchlist: (symbol) =>
     request(`/watchlist/${encodeURIComponent(symbol)}`, { method: "DELETE" }),
   getDigest: () => request("/digest"),
+  ackDigest: (cursor) =>
+    request("/digest/ack", { method: "POST", body: JSON.stringify({ cursor }) }),
   runScenario: () => request("/demo/run-scenario", { method: "POST" }),
   resetDemo: () => request("/demo/reset", { method: "POST" }),
   setChaos: (enabled) => request(`/demo/chaos?enabled=${enabled}`, { method: "POST" }),

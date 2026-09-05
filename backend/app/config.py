@@ -22,4 +22,17 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
+INSECURE_JWT_DEFAULT = "dev-secret-change-me"
+
 settings = Settings()
+
+# The development default is published in this repository, so anyone could
+# mint a token for any account with it. Refuse to start rather than run
+# publicly with a known signing key -- a misconfigured deploy should fail
+# loudly, not serve traffic that looks fine and is silently forgeable.
+if settings.env == "production" and settings.jwt_secret == INSECURE_JWT_DEFAULT:
+    raise RuntimeError(
+        "JWT_SECRET is still the development default. Set a real secret "
+        "before running in production: python -c \"import secrets; "
+        "print(secrets.token_urlsafe(32))\""
+    )
