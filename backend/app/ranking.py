@@ -19,6 +19,13 @@ FIRST_VISIT_LOOKBACK_HOURS = 24  # a brand-new user has no watermark to diff
 # against -- look back a bounded window rather than the symbol's entire history
 DIGEST_CAP = 3
 
+# How far off its peak a price must sit before the move counts as reverted.
+# This is not just presentation: an event's headline describes the moment it
+# fired ("breaking 52-week high"), which becomes false once the price falls
+# back. A reverted move must be reported as a path, whatever the gap length,
+# or the digest states something that is no longer true.
+REVERTED_OFF_PEAK_PCT = 0.02
+
 
 def build_digest(conn, user_id: int, now: datetime) -> dict:
     # Read the existing watermark BEFORE advancing it -- this is the value
@@ -40,7 +47,14 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
     _advance_watermark(conn, user_id, now)
 
     if not watchlist_rows:
-        return {"mode": "empty_watchlist", "gap_minutes": None, "events": [], "suppressed_count": 0}
+        return {
+            "mode": "empty_watchlist",
+            "gap_minutes": None,
+            "events": [],
+            "suppressed_count": 0,
+            "watched_count": 0,
+            "flagged_count": 0,
+        }
 
     watchlist_by_symbol = {row["symbol"]: row for row in watchlist_rows}
     symbols = list(watchlist_by_symbol.keys())
@@ -74,23 +88,55 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
 
     events = [e for e in events if not is_muted(e)]
 
-    if is_long_gap:
-        candidates = _aggregate_by_symbol(events)
-        candidates = [c for c in candidates if c["score"] >= LONG_GAP_RAISE_THRESHOLD]
-        mode = "long_gap"
-    else:
-        candidates = [
-            {
-                "symbol": e["symbol"],
-                "kind": e["kind"],
-                "score": float(e["score"]),
-                "reason_text": e["reason_text"],
-                "first_seen_ts": e["first_seen_ts"].isoformat(),
-                "last_updated_ts": e["last_updated_ts"].isoformat(),
-            }
-            for e in events
-        ]
-        mode = "short_gap"
+    # The revert story needs where the price is NOW, not just where the
+    # event peaked -- "peaked 1639.60, now back at 1562" is the whole
+    # point (BUILD_PLAN.md section 6).
+    latest_prices = dict(
+        conn.execute(
+            text(
+                """
+                SELECT s.symbol, latest.price
+                FROM unnest(CAST(:symbols AS text[])) AS s(symbol)
+                JOIN LATERAL (
+                    SELECT price FROM snapshots
+                    WHERE snapshots.symbol = s.symbol
+                    ORDER BY source_ts DESC LIMIT 1
+                ) latest ON true
+                """
+            ),
+            {"symbols": symbols},
+        ).all()
+    )
+
+    mode = "long_gap" if is_long_gap else "short_gap"
+
+    # Decide per symbol, not globally: a move that round-tripped needs the
+    # path story even over a short gap, because its headline no longer
+    # describes where the price actually is.
+    by_symbol: dict[str, list] = {}
+    for e in events:
+        by_symbol.setdefault(e["symbol"], []).append(e)
+
+    candidates = []
+    for symbol, symbol_events in by_symbol.items():
+        if is_long_gap or _has_reverted(symbol_events, latest_prices.get(symbol)):
+            summary = _aggregate_by_symbol(symbol_events, latest_prices)
+            if is_long_gap:
+                summary = [s for s in summary if s["score"] >= LONG_GAP_RAISE_THRESHOLD]
+            candidates.extend(summary)
+        else:
+            candidates.extend(
+                {
+                    "symbol": e["symbol"],
+                    "kind": e["kind"],
+                    "score": float(e["score"]),
+                    "reason_text": e["reason_text"],
+                    "first_seen_ts": e["first_seen_ts"].isoformat(),
+                    "last_updated_ts": e["last_updated_ts"].isoformat(),
+                    "reverted": False,
+                }
+                for e in symbol_events
+            )
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
     surfaced = candidates[:DIGEST_CAP]
@@ -101,10 +147,28 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
         "gap_minutes": gap_minutes,
         "events": surfaced,
         "suppressed_count": suppressed_count,
+        # Restraint is only visible against the size of what was checked:
+        # "1 of 40" says something that a bare event count cannot.
+        "watched_count": len(watchlist_rows),
+        "flagged_count": len({c["symbol"] for c in candidates}),
     }
 
 
-def _aggregate_by_symbol(events) -> list[dict]:
+def _has_reverted(symbol_events, current_price) -> bool:
+    """True when the price has fallen back meaningfully from the peak the
+    event recorded -- i.e. the move happened and came back."""
+    if current_price is None:
+        return False
+    peaks = [float(e["peak_price"]) for e in symbol_events if e["peak_price"] is not None]
+    if not peaks:
+        return False
+    peak = max(peaks)
+    if peak <= 0:
+        return False
+    return (float(current_price) - peak) / peak <= -REVERTED_OFF_PEAK_PCT
+
+
+def _aggregate_by_symbol(events, latest_prices: dict[str, float]) -> list[dict]:
     by_symbol: dict[str, dict] = {}
     for e in events:
         agg = by_symbol.setdefault(
@@ -121,10 +185,19 @@ def _aggregate_by_symbol(events) -> list[dict]:
         )
         agg["score"] = max(agg["score"], float(e["score"]))
         agg["event_count"] += 1
+
+        # Postgres NUMERIC arrives as Decimal -- normalise to float on the
+        # way in so nothing downstream mixes the two types. Compare with
+        # `is None`, not truthiness: a legitimate 0.0 must not read as absent.
         if e["peak_price"] is not None:
-            agg["peak_price"] = max(agg["peak_price"] or e["peak_price"], float(e["peak_price"]))
+            peak = float(e["peak_price"])
+            agg["peak_price"] = peak if agg["peak_price"] is None else max(agg["peak_price"], peak)
         if e["trough_price"] is not None:
-            agg["trough_price"] = min(agg["trough_price"] or e["trough_price"], float(e["trough_price"]))
+            trough = float(e["trough_price"])
+            agg["trough_price"] = (
+                trough if agg["trough_price"] is None else min(agg["trough_price"], trough)
+            )
+
         agg["first_seen_ts"] = min(agg["first_seen_ts"], e["first_seen_ts"])
         agg["last_updated_ts"] = max(agg["last_updated_ts"], e["last_updated_ts"])
 
@@ -132,25 +205,39 @@ def _aggregate_by_symbol(events) -> list[dict]:
     for agg in by_symbol.values():
         peak = agg["peak_price"]
         trough = agg["trough_price"]
-        range_pct = (peak - trough) / trough if (peak and trough) else None
-        reason = f"{agg['symbol']}  {agg['event_count']} event(s)"
-        if peak is not None and trough is not None:
-            reason += f" | peak {peak:.2f} / trough {trough:.2f}"
-            if range_pct is not None:
-                reason += f" ({range_pct:+.1%} range)"
-        reason += f" | last active {agg['last_updated_ts'].strftime('%H:%M')}"
+        current = latest_prices.get(agg["symbol"])
+        current = float(current) if current is not None else None
+
+        parts = []
+        reverted = False
+        if peak is not None:
+            parts.append(f"peaked {peak:.2f}")
+        if current is not None:
+            parts.append(f"now {current:.2f}")
+        # Distance from the peak is what makes a revert visible: the price
+        # can be unchanged since you left and still have travelled.
+        if peak is not None and peak > 0 and current is not None:
+            off_peak = (current - peak) / peak
+            if off_peak <= -0.005:
+                parts.append(f"{off_peak:+.1%} off peak")
+            reverted = off_peak <= -REVERTED_OFF_PEAK_PCT
+        count = agg["event_count"]
+        parts.append(f"{count} event{'' if count == 1 else 's'} while away")
+        parts.append(f"last active {agg['last_updated_ts'].strftime('%H:%M')}")
 
         results.append(
             {
                 "symbol": agg["symbol"],
                 "kind": "path_summary",
                 "score": agg["score"],
-                "reason_text": reason,
+                "reason_text": f"{agg['symbol']}  " + " | ".join(parts),
                 "first_seen_ts": agg["first_seen_ts"].isoformat(),
                 "last_updated_ts": agg["last_updated_ts"].isoformat(),
                 "peak_price": peak,
                 "trough_price": trough,
-                "event_count": agg["event_count"],
+                "current_price": current,
+                "event_count": count,
+                "reverted": reverted,
             }
         )
     return results

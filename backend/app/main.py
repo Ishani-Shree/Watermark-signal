@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +10,9 @@ from .auth import create_access_token, get_current_user_id, hash_password, verif
 from .config import settings
 from .db import engine
 from .detection import compute_score, upsert_event
+from .provider_health import ProviderUnavailable, health
 from .providers import get_provider
+from .providers import replay_provider as replay_clock
 from .ranking import build_digest
 
 app = FastAPI(title="Watermark API")
@@ -50,9 +52,165 @@ class WatchlistUpdateRequest(BaseModel):
     muted_kinds: list[str] | None = None
 
 
+@app.get("/")
+def root():
+    """This is the API, not the app -- say so. Anyone who pastes the
+    backend URL into a browser (a judge, most likely) should land on a
+    signpost rather than a bare 404."""
+    return {
+        "service": "Watermark API",
+        "what": "An attention filter for a market watchlist: what actually "
+                "changed since you last looked, and why it mattered.",
+        "app": "https://watermark-signal.pages.dev",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
 @app.get("/health")
-def health():
-    return {"status": "ok", "env": settings.env, "provider": settings.provider}
+def health_check():
+    """Reports degradation rather than hiding it. `degraded` true means we
+    are knowingly serving aged data -- the UI says so out loud."""
+    provider_state = health.snapshot()
+    return {
+        "status": "ok",
+        "env": settings.env,
+        "provider": settings.provider,
+        "degraded": provider_state["state"] != "closed" or provider_state["chaos_enabled"],
+        "provider_health": provider_state,
+    }
+
+
+@app.post("/demo/chaos")
+def demo_chaos(enabled: bool):
+    """Flip the upstream provider into a simulated outage. Exists so the
+    degraded path can be demonstrated deliberately (BUILD_PLAN.md section
+    13, step 4) instead of hoping Yahoo misbehaves during the demo."""
+    _require_replay_provider()
+    health.chaos_enabled = enabled
+    if not enabled:
+        # Turning chaos off also clears the breaker, so recovery is
+        # immediate on stage rather than after a 60s cooldown.
+        health.record_success()
+    return {"chaos_enabled": health.chaos_enabled, "provider_health": health.snapshot()}
+
+
+def run_ingest_cycle(conn) -> dict:
+    """One full ingest + detection pass. Extracted so the cron endpoint and
+    the demo scenario runner drive the exact same code path -- the demo
+    fast-forwards the feed clock, it does not inject events."""
+    provider = get_provider()
+    confidence = "replay" if settings.provider == "replay" else "live"
+
+    rows = conn.execute(
+        text(
+            """
+            SELECT s.symbol, s.market_index_symbol, s.sector_index_symbol,
+                   b.ret_stddev_30d, b.avg_volume_20d, b.wk52_high, b.wk52_low
+            FROM symbols s
+            LEFT JOIN baselines b ON b.symbol = s.symbol
+            """
+        )
+    ).mappings().all()
+    symbol_info = {row["symbol"]: dict(row) for row in rows}
+
+    events_touched = 0
+    quotes_by_symbol = {}
+    quotes_out = []
+    rows_to_write = []
+
+    failed_symbols = []
+    breaker_tripped = False
+
+    for symbol in symbol_info:
+        # One sick symbol must not abort the whole cycle. An open breaker,
+        # on the other hand, should stop the run immediately rather than
+        # retrying a provider we already know is down 48 more times.
+        try:
+            quote = provider.get_latest(symbol)
+        except ProviderUnavailable:
+            breaker_tripped = True
+            break
+        except Exception:  # noqa: BLE001 - upstream is unofficial
+            failed_symbols.append(symbol)
+            continue
+
+        if quote is None:
+            failed_symbols.append(symbol)
+            continue
+        quotes_by_symbol[symbol] = quote
+        rows_to_write.append(
+            {
+                "symbol": quote.symbol,
+                "source_ts": quote.source_ts,
+                "price": quote.price,
+                "volume": quote.volume,
+                "prev_close": quote.prev_close,
+                "source": quote.source,
+                "confidence": confidence,
+            }
+        )
+        quotes_out.append(
+            {"symbol": quote.symbol, "price": quote.price, "source_ts": quote.source_ts.isoformat()}
+        )
+
+    # One batched round trip rather than one per symbol. The DB is remote,
+    # so round trips -- not the inserts themselves -- are the cost that
+    # grows with watchlist size.
+    ingested = 0
+    if rows_to_write:
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO snapshots
+                    (symbol, source_ts, price, volume, prev_close, source, confidence)
+                VALUES
+                    (:symbol, :source_ts, :price, :volume, :prev_close, :source, :confidence)
+                ON CONFLICT (symbol, source_ts) DO NOTHING
+                """
+            ),
+            rows_to_write,
+        )
+        ingested = result.rowcount if result.rowcount is not None and result.rowcount >= 0 else len(rows_to_write)
+
+    for symbol, quote in quotes_by_symbol.items():
+        if symbol in INDEX_SYMBOLS:
+            continue
+
+        info = symbol_info[symbol]
+        index_symbol = info["sector_index_symbol"] or info["market_index_symbol"]
+        index_quote = quotes_by_symbol.get(index_symbol)
+
+        index_pct_change = None
+        index_label = None
+        if index_quote and index_quote.prev_close:
+            index_pct_change = (index_quote.price - index_quote.prev_close) / index_quote.prev_close
+            # Honest labeling: only call it "sector" if it actually is one,
+            # otherwise it's the NIFTY fallback -- see BUILD_PLAN.md section 5.
+            index_label = "sector" if info["sector_index_symbol"] else "NIFTY"
+
+        score = compute_score(
+            symbol=symbol,
+            price=quote.price,
+            prev_close=quote.prev_close,
+            volume=quote.volume,
+            baseline=info,
+            index_pct_change=index_pct_change,
+            index_label=index_label,
+        )
+        cluster_key = upsert_event(conn, quote.source_ts, quote.price, score)
+        if cluster_key:
+            events_touched += 1
+
+    return {
+        "checked": len(symbol_info),
+        "ingested": ingested,
+        "events_touched": events_touched,
+        "failed": len(failed_symbols),
+        "breaker_tripped": breaker_tripped,
+        "provider_health": health.snapshot(),
+        "quotes": quotes_out,
+    }
 
 
 @app.get("/ingest")
@@ -69,94 +227,84 @@ def ingest():
     symbol's baseline and the index, then open/extend an event if it's
     significant enough.
     """
-    provider = get_provider()
-    confidence = "replay" if settings.provider == "replay" else "live"
-
     with engine.begin() as conn:
-        rows = conn.execute(
+        return run_ingest_cycle(conn)
+
+
+def _require_replay_provider():
+    """Demo controls only exist for the scripted feed -- you cannot
+    fast-forward a live market. This is the gate, not a config flag."""
+    if settings.provider != "replay":
+        raise HTTPException(
+            status_code=403, detail="Demo controls are only available on the replay feed"
+        )
+
+
+@app.post("/demo/run-scenario")
+def demo_run_scenario(user_id: int = Depends(get_current_user_id)):
+    """Step the replay clock through the whole scripted timeline, running a
+    real ingest+detection pass at each point. Nothing is injected: the
+    scoring layer sees the same quotes it would have seen live and reaches
+    its own conclusions -- this only removes the wait. Makes the 5-minute
+    demo deterministic (BUILD_PLAN.md section 13)."""
+    _require_replay_provider()
+
+    minutes = replay_clock.scenario_minutes()
+    span = float(max(minutes)) if minutes else 0.0
+    # Land the scenario in the recent past, ending now -- so it reads as
+    # "what happened while you were away", not as future-dated quotes.
+    anchor_end = datetime.now(timezone.utc)
+
+    steps = []
+    try:
+        for minute in minutes:
+            replay_clock.pin_minute(minute, anchor_end=anchor_end, span=span)
+            with engine.begin() as conn:
+                result = run_ingest_cycle(conn)
+            steps.append(
+                {
+                    "minute": minute,
+                    "ingested": result["ingested"],
+                    "events_touched": result["events_touched"],
+                }
+            )
+    finally:
+        # Always hand the clock back to real time, even if a step raised.
+        replay_clock.pin_minute(None)
+
+    # The scenario represents time that passed while you were away, so put
+    # the read watermark back to before it started -- otherwise the events
+    # land behind a watermark that was advanced when the page loaded, and
+    # the demo can never show its own scenario.
+    #
+    # This is the one place that deliberately moves a watermark BACKWARD.
+    # The normal path is monotonic (see ranking._advance_watermark); this
+    # is a demo-only rewind, gated to the replay feed.
+    scenario_start = anchor_end - timedelta(minutes=span)
+    with engine.begin() as conn:
+        conn.execute(
             text(
                 """
-                SELECT s.symbol, s.market_index_symbol, s.sector_index_symbol,
-                       b.ret_stddev_30d, b.avg_volume_20d, b.wk52_high, b.wk52_low
-                FROM symbols s
-                LEFT JOIN baselines b ON b.symbol = s.symbol
+                INSERT INTO read_state (user_id, last_viewed_at)
+                VALUES (:uid, :ts)
+                ON CONFLICT (user_id) DO UPDATE SET last_viewed_at = EXCLUDED.last_viewed_at
                 """
-            )
-        ).mappings().all()
-        symbol_info = {row["symbol"]: dict(row) for row in rows}
+            ),
+            {"uid": user_id, "ts": scenario_start},
+        )
 
-        ingested = 0
-        events_touched = 0
-        quotes_by_symbol = {}
-        quotes_out = []
+    return {"steps": steps, "rewound_watermark_to": scenario_start.isoformat()}
 
-        for symbol in symbol_info:
-            quote = provider.get_latest(symbol)
-            if quote is None:
-                continue
-            quotes_by_symbol[symbol] = quote
 
-            result = conn.execute(
-                text(
-                    """
-                    INSERT INTO snapshots
-                        (symbol, source_ts, price, volume, prev_close, source, confidence)
-                    VALUES
-                        (:symbol, :source_ts, :price, :volume, :prev_close, :source, :confidence)
-                    ON CONFLICT (symbol, source_ts) DO NOTHING
-                    """
-                ),
-                {
-                    "symbol": quote.symbol,
-                    "source_ts": quote.source_ts,
-                    "price": quote.price,
-                    "volume": quote.volume,
-                    "prev_close": quote.prev_close,
-                    "source": quote.source,
-                    "confidence": confidence,
-                },
-            )
-            if result.rowcount:
-                ingested += 1
-            quotes_out.append(
-                {"symbol": quote.symbol, "price": quote.price, "source_ts": quote.source_ts.isoformat()}
-            )
-
-        for symbol, quote in quotes_by_symbol.items():
-            if symbol in INDEX_SYMBOLS:
-                continue
-
-            info = symbol_info[symbol]
-            index_symbol = info["sector_index_symbol"] or info["market_index_symbol"]
-            index_quote = quotes_by_symbol.get(index_symbol)
-
-            index_pct_change = None
-            index_label = None
-            if index_quote and index_quote.prev_close:
-                index_pct_change = (index_quote.price - index_quote.prev_close) / index_quote.prev_close
-                # Honest labeling: only call it "sector" if it actually is one,
-                # otherwise it's the NIFTY fallback -- see BUILD_PLAN.md section 5.
-                index_label = "sector" if info["sector_index_symbol"] else "NIFTY"
-
-            score = compute_score(
-                symbol=symbol,
-                price=quote.price,
-                prev_close=quote.prev_close,
-                volume=quote.volume,
-                baseline=info,
-                index_pct_change=index_pct_change,
-                index_label=index_label,
-            )
-            cluster_key = upsert_event(conn, quote.source_ts, quote.price, score)
-            if cluster_key:
-                events_touched += 1
-
-    return {
-        "checked": len(symbol_info),
-        "ingested": ingested,
-        "events_touched": events_touched,
-        "quotes": quotes_out,
-    }
+@app.post("/demo/reset")
+def demo_reset():
+    """Clear all detected events and snapshots so a scenario can be re-run
+    from a clean slate. Leaves users, watchlists and baselines intact."""
+    _require_replay_provider()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM events"))
+        conn.execute(text("DELETE FROM snapshots"))
+    return {"ok": True}
 
 
 @app.get("/snapshots/{symbol}/latest")
@@ -201,6 +349,16 @@ def list_events():
     return {"events": [dict(r) for r in rows]}
 
 
+@app.get("/symbols")
+def list_symbols():
+    """Populates the 'add to watchlist' picker on the frontend."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT symbol, name, exchange FROM symbols WHERE symbol != '^NSEI' ORDER BY name")
+        ).mappings().all()
+    return {"symbols": [dict(r) for r in rows]}
+
+
 @app.post("/auth/signup")
 def signup(body: SignupRequest):
     with engine.begin() as conn:
@@ -231,13 +389,24 @@ def login(body: LoginRequest):
 
 @app.get("/watchlist")
 def get_watchlist(user_id: int = Depends(get_current_user_id)):
+    """Joins each watchlist item against its latest snapshot -- current
+    price, staleness (source/confidence), and observation time -- so the
+    frontend never has to make N extra calls to show live state."""
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 """
-                SELECT w.symbol, s.name, w.note, w.target_price, w.muted_kinds, w.added_at
+                SELECT w.symbol, s.name, w.note, w.target_price, w.muted_kinds, w.added_at,
+                       latest.price, latest.source, latest.confidence, latest.source_ts
                 FROM watchlist_items w
                 JOIN symbols s ON s.symbol = w.symbol
+                LEFT JOIN LATERAL (
+                    SELECT price, source, confidence, source_ts
+                    FROM snapshots
+                    WHERE snapshots.symbol = w.symbol
+                    ORDER BY source_ts DESC
+                    LIMIT 1
+                ) latest ON true
                 WHERE w.user_id = :uid
                 ORDER BY w.added_at
                 """
