@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -14,6 +15,7 @@ from .provider_health import ProviderUnavailable, health
 from .ratelimit import rate_limit_auth
 from .providers import get_provider
 from .providers import replay_provider as replay_clock
+from .providers.yfinance_provider import YFinanceProvider
 from .ranking import acknowledge, build_digest
 
 app = FastAPI(title="Watermark API")
@@ -110,6 +112,53 @@ def root():
     }
 
 
+@app.get("/diagnostics/live-provider")
+def diagnostics_live_provider(
+    symbol: str = "RELIANCE.NS", user_id: int = Depends(get_current_user_id)
+):
+    """Attempt a REAL upstream fetch from this host, whatever provider is
+    configured.
+
+    The decision to run on the replay feed rests on a claim -- that yfinance
+    is rate-limited from a datacenter IP -- which deserves evidence rather
+    than assumption. This answers it from the machine that would actually be
+    doing the fetching. Deliberately bypasses GuardedProvider so the circuit
+    breaker and chaos switch cannot colour the result.
+    """
+    started = time.perf_counter()
+    try:
+        quote = YFinanceProvider().get_latest(symbol)
+    except Exception as exc:  # noqa: BLE001 - the failure mode IS the answer
+        return {
+            "reachable": False,
+            "symbol": symbol,
+            "error": f"{type(exc).__name__}: {exc}"[:300],
+            "elapsed_ms": round((time.perf_counter() - started) * 1000),
+        }
+
+    elapsed_ms = round((time.perf_counter() - started) * 1000)
+    if quote is None:
+        return {
+            "reachable": False,
+            "symbol": symbol,
+            "error": "provider returned no quote",
+            "elapsed_ms": elapsed_ms,
+        }
+
+    return {
+        "reachable": True,
+        "symbol": quote.symbol,
+        "price": quote.price,
+        "volume": quote.volume,
+        "prev_close": quote.prev_close,
+        "source_ts": quote.source_ts.isoformat(),
+        # False means the market timestamp was unavailable, so this quote
+        # could not be deduped reliably -- see DECISIONS.md.
+        "has_market_ts": quote.has_market_ts,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
 @app.get("/health")
 def health_check():
     """Reports degradation rather than hiding it. `degraded` true means we
@@ -181,6 +230,16 @@ def run_ingest_cycle(conn) -> dict:
         if quote is None:
             failed_symbols.append(symbol)
             continue
+
+        # A live quote missing price/volume/prev_close is routine with an
+        # unofficial upstream. Reject it HERE, per symbol -- letting a None
+        # through means the float()/int() coercion below raises mid-batch and
+        # aborts the insert for every other symbol too, defeating the
+        # isolation this loop exists to provide.
+        if quote.price is None or quote.volume is None or quote.prev_close is None:
+            failed_symbols.append(symbol)
+            continue
+
         quotes_by_symbol[symbol] = quote
         rows_to_write.append(
             {
@@ -547,6 +606,18 @@ def update_watchlist_item(
         fields["muted_kinds"] = body.muted_kinds
 
     if not fields:
+        # Nothing to change is still a claim about a row that must exist.
+        # Returning ok here would report success for a symbol the caller
+        # does not have -- and for one nobody has.
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text(
+                    "SELECT 1 FROM watchlist_items WHERE user_id = :uid AND symbol = :symbol"
+                ),
+                {"uid": user_id, "symbol": symbol},
+            ).first()
+        if not exists:
+            raise HTTPException(status_code=404, detail="Not in watchlist")
         return {"ok": True}
 
     # Column names are interpolated into SQL, so they must never come from
@@ -570,10 +641,16 @@ def update_watchlist_item(
 @app.delete("/watchlist/{symbol}")
 def remove_from_watchlist(symbol: str, user_id: int = Depends(get_current_user_id)):
     with engine.begin() as conn:
-        conn.execute(
+        result = conn.execute(
             text("DELETE FROM watchlist_items WHERE user_id = :uid AND symbol = :symbol"),
             {"uid": user_id, "symbol": symbol},
         )
+    # Deleting nothing is not the same as deleting something. Reporting ok
+    # for a symbol the caller never watched hides real client bugs -- the UI
+    # would show the removal "working" while the row it meant to remove is
+    # still there under a different user.
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Not in watchlist")
     return {"ok": True}
 
 

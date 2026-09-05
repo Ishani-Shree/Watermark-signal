@@ -153,13 +153,24 @@ def upsert_event(conn, now: datetime, price: float, score: ScoreResult) -> str |
         {"symbol": score.symbol},
     ).mappings().first()
 
-    is_extend = recent is not None and (
-        (now - recent["last_updated_ts"]).total_seconds() <= EXTEND_WINDOW_MINUTES * 60
-    )
+    # The lower bound matters as much as the upper one. A late-arriving
+    # snapshot has `now` EARLIER than the event's last update; without
+    # `0 <=` it still counts as an extension and then drags
+    # last_updated_ts backwards, which can push an already-surfaced event
+    # back behind a user's watermark and make it silently disappear. Out of
+    # order arrival is normal with an unreliable provider.
+    if recent is not None:
+        age_seconds = (now - recent["last_updated_ts"]).total_seconds()
+        is_extend = 0 <= age_seconds <= EXTEND_WINDOW_MINUTES * 60
+    else:
+        is_extend = False
 
     if is_extend:
-        peak = max(float(recent["peak_price"] or price), price)
-        trough = min(float(recent["trough_price"] or price), price)
+        # `or` would treat a legitimate price of 0 as missing.
+        prev_peak = recent["peak_price"]
+        prev_trough = recent["trough_price"]
+        peak = max(float(prev_peak) if prev_peak is not None else price, price)
+        trough = min(float(prev_trough) if prev_trough is not None else price, price)
 
         # An event's headline is its PEAK reading, not its latest. A move
         # that spiked hard and is now easing off should still be reported
