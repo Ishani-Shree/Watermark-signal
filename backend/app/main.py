@@ -19,9 +19,17 @@ app = FastAPI(title="Watermark API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten before submission
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_origin_list,
+    # Cloudflare Pages gives every preview build its own subdomain, so those
+    # cannot be enumerated ahead of time. The regex is anchored on both ends
+    # to the exact project -- an unanchored pattern would also match a
+    # hostile `watermark-signal.pages.dev.attacker.com`.
+    allow_origin_regex=r"^https://[a-z0-9-]+\.watermark-signal\.pages\.dev$",
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    # Auth travels as a Bearer header, never a cookie, so the browser never
+    # needs to attach credentials cross-origin.
+    allow_credentials=False,
 )
 
 # Symbols that are themselves market/sector indices -- they get snapshots

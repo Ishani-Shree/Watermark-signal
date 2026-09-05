@@ -307,6 +307,7 @@ price history.
 | `DATABASE_URL` | backend | Postgres connection string |
 | `JWT_SECRET` | backend | Signing key for auth tokens |
 | `PROVIDER` | backend | `replay` (scripted) or `yfinance` (live) |
+| `CORS_ORIGINS` | backend | Comma-separated allowed origins (defaults cover the deployed app and local Vite ports) |
 | `PYTHON_VERSION` | Render | Must be `3.11.9` |
 | `VITE_API_BASE` | frontend | Backend base URL |
 

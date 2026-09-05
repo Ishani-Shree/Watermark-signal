@@ -45,6 +45,15 @@ Format: date/hour, decision, alternative rejected, why.
   of the version-detection path catching it). `bcrypt` itself works fine;
   only passlib's compatibility shim was broken. Direct calls are also just
   simpler -- one less abstraction layer for two functions.
+- **Hour 38-42** — CORS narrowed from `allow_origins=["*"]` to an explicit
+  list plus an anchored regex for Cloudflare Pages preview subdomains
+  (which get random names and cannot be enumerated ahead of time). The
+  regex is anchored at both ends deliberately: an unanchored pattern would
+  also match `watermark-signal.pages.dev.attacker.com`, which is a
+  different domain entirely. Methods and headers are enumerated rather than
+  `*`, and `allow_credentials` stays False because auth travels as a Bearer
+  header and never as a cookie. Verified by preflighting each case,
+  including the lookalike.
 - **Hour 35-38** — Tests target judgement, not arithmetic. Asserting that
   `40 * min(z/3, 1)` equals what the same expression computes proves
   nothing; asserting that a market-wide move is not mistaken for
