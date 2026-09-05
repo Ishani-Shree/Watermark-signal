@@ -15,8 +15,12 @@ from sqlalchemy import text
 SHORT_GAP_MINUTES = 120  # under this, show individual events at the normal bar
 LONG_GAP_RAISE_THRESHOLD = 65  # above SHORT_GAP_MINUTES, raise the bar so a
 # week of ordinary drift doesn't generate a wall of flags
-FIRST_VISIT_LOOKBACK_HOURS = 24  # a brand-new user has no watermark to diff
-# against -- look back a bounded window rather than the symbol's entire history
+# A brand-new user has no watermark to diff against, so look back a bounded
+# window rather than the symbol's whole history. 72 hours, not 24, because
+# markets close: on a Sunday the last session was Friday, and a 24-hour
+# window shows a new user an empty digest while real Friday moves sit just
+# outside it. Three days covers a weekend and most single-day holidays.
+FIRST_VISIT_LOOKBACK_HOURS = 72
 DIGEST_CAP = 3
 
 # A target price is the one signal that cannot live in the detection layer.
