@@ -171,6 +171,11 @@ def health_check():
         "env": settings.env,
         "provider": settings.provider,
         "degraded": provider_state["state"] != "closed" or provider_state["chaos_enabled"],
+        # Whether the demo controls are available. The UI must key off this,
+        # not off `provider` -- the two are independent, and gating the
+        # buttons on the provider would hide them exactly when the
+        # deployment runs on live data, which is when they matter most.
+        "demo_controls": settings.demo_controls,
         "provider_health": provider_state,
     }
 

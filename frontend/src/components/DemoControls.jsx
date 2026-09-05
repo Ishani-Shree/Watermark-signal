@@ -5,7 +5,7 @@ import { api } from "../api";
    real ingest + detection pass at each point, so the spike-and-revert can
    be demonstrated on command instead of waiting an hour for it. Nothing is
    injected -- the detection layer reaches its own conclusions. */
-export default function DemoControls({ onComplete, degraded }) {
+export default function DemoControls({ onComplete, degraded, live }) {
   const [busy, setBusy] = useState(null);
   const [note, setNote] = useState(null);
 
@@ -45,7 +45,9 @@ export default function DemoControls({ onComplete, degraded }) {
     <div className="demo-bar">
       <div className="demo-bar__label">
         <span className="demo-bar__tag">Demo</span>
-        Replay the scripted market day through the live detection pipeline.
+        {live
+          ? "Running on live data. Replay a scripted day through the same pipeline — Reset restores real prices."
+          : "Replay the scripted market day through the live detection pipeline."}
       </div>
 
       <div className="demo-bar__actions">

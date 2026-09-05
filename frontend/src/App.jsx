@@ -126,8 +126,16 @@ function App() {
         </div>
       </header>
 
-      {sourceMode === "replay" && (
-        <DemoControls onComplete={() => refreshAll()} degraded={degraded} />
+      {/* Keyed on the demo switch, NOT on the provider. Gating these on
+          `provider === replay` hid them exactly when the deployment ran on
+          live data -- the case where being able to replay a scripted day on
+          demand matters most. */}
+      {health?.demo_controls && (
+        <DemoControls
+          onComplete={() => refreshAll()}
+          degraded={degraded}
+          live={sourceMode === "live"}
+        />
       )}
 
       {actionError && <div className="degraded-banner">{actionError}</div>}
