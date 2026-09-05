@@ -1,0 +1,194 @@
+{
+  "ADANIENT.NS": {
+    "price": 2938.0,
+    "volume": 1898249
+  },
+  "ADANIPORTS.NS": {
+    "price": 1707.3,
+    "volume": 2339322
+  },
+  "APOLLOHOSP.NS": {
+    "price": 8650.0,
+    "volume": 402901
+  },
+  "ASIANPAINT.NS": {
+    "price": 2527.3,
+    "volume": 639966
+  },
+  "AXISBANK.NS": {
+    "price": 1273.0,
+    "volume": 4789336
+  },
+  "BAJAJ-AUTO.NS": {
+    "price": 11919.0,
+    "volume": 238684
+  },
+  "BAJAJFINSV.NS": {
+    "price": 1992.1,
+    "volume": 679068
+  },
+  "BAJFINANCE.NS": {
+    "price": 1060.5,
+    "volume": 4829751
+  },
+  "BEL.NS": {
+    "price": 405.35,
+    "volume": 9342155
+  },
+  "BHARTIARTL.NS": {
+    "price": 1840.0,
+    "volume": 6816347
+  },
+  "CIPLA.NS": {
+    "price": 1385.0,
+    "volume": 723147
+  },
+  "COALINDIA.NS": {
+    "price": 415.35,
+    "volume": 9909513
+  },
+  "DRREDDY.NS": {
+    "price": 1155.0,
+    "volume": 1495910
+  },
+  "EICHERMOT.NS": {
+    "price": 7630.5,
+    "volume": 418891
+  },
+  "GRASIM.NS": {
+    "price": 3310.0,
+    "volume": 1280840
+  },
+  "HCLTECH.NS": {
+    "price": 1293.4,
+    "volume": 1867886
+  },
+  "HDFCBANK.NS": {
+    "price": 712.1,
+    "volume": 26744390
+  },
+  "HDFCLIFE.NS": {
+    "price": 546.4,
+    "volume": 2634734
+  },
+  "HEROMOTOCO.NS": {
+    "price": 5300.0,
+    "volume": 625051
+  },
+  "HINDALCO.NS": {
+    "price": 1010.0,
+    "volume": 3724508
+  },
+  "HINDUNILVR.NS": {
+    "price": 1973.4,
+    "volume": 1203784
+  },
+  "ICICIBANK.NS": {
+    "price": 1423.2,
+    "volume": 8773986
+  },
+  "INDUSINDBK.NS": {
+    "price": 1008.5,
+    "volume": 1195560
+  },
+  "INFY.NS": {
+    "price": 1130.0,
+    "volume": 7950013
+  },
+  "ITC.NS": {
+    "price": 264.1,
+    "volume": 14097168
+  },
+  "JSWSTEEL.NS": {
+    "price": 1325.0,
+    "volume": 1651124
+  },
+  "KOTAKBANK.NS": {
+    "price": 421.15,
+    "volume": 11854757
+  },
+  "LT.NS": {
+    "price": 3975.0,
+    "volume": 1303122
+  },
+  "M&M.NS": {
+    "price": 3150.0,
+    "volume": 1791507
+  },
+  "MARUTI.NS": {
+    "price": 12694.0,
+    "volume": 321656
+  },
+  "NESTLEIND.NS": {
+    "price": 1416.0,
+    "volume": 1547622
+  },
+  "NTPC.NS": {
+    "price": 332.5,
+    "volume": 8595838
+  },
+  "ONGC.NS": {
+    "price": 234.65,
+    "volume": 11570474
+  },
+  "POWERGRID.NS": {
+    "price": 266.0,
+    "volume": 8237231
+  },
+  "RELIANCE.NS": {
+    "price": 1322.0,
+    "volume": 10498450
+  },
+  "SBILIFE.NS": {
+    "price": 1775.0,
+    "volume": 900972
+  },
+  "SBIN.NS": {
+    "price": 1016.1,
+    "volume": 8345061
+  },
+  "SHRIRAMFIN.NS": {
+    "price": 1041.0,
+    "volume": 3697901
+  },
+  "SUNPHARMA.NS": {
+    "price": 1899.0,
+    "volume": 1540391
+  },
+  "TATACONSUM.NS": {
+    "price": 1010.0,
+    "volume": 1217775
+  },
+  "TATASTEEL.NS": {
+    "price": 188.79,
+    "volume": 27821449
+  },
+  "TCS.NS": {
+    "price": 2304.0,
+    "volume": 2565782
+  },
+  "TECHM.NS": {
+    "price": 1596.9,
+    "volume": 2194233
+  },
+  "TITAN.NS": {
+    "price": 5027.0,
+    "volume": 763974
+  },
+  "TRENT.NS": {
+    "price": 2815.6,
+    "volume": 685264
+  },
+  "ULTRACEMCO.NS": {
+    "price": 11275.0,
+    "volume": 237713
+  },
+  "WIPRO.NS": {
+    "price": 176.4,
+    "volume": 7943433
+  },
+  "^NSEI": {
+    "price": 23897.7,
+    "volume": 290065
+  }
+}

@@ -1,4 +1,6 @@
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .base import PriceProvider, Quote
 
@@ -9,7 +11,13 @@ from .base import PriceProvider, Quote
 # real avg_volume_20d / wk52_high / wk52_low it gets scored against.
 # Getting this wrong means every symbol looks like it's breaching its
 # 52-week range on every tick, which would drown out the actual signal.
-SCRIPTS: dict[str, list[tuple[int, float, int]]] = {
+#
+# ACTORS are hand-authored: the few symbols that actually do something in
+# the demo scenario. Every other symbol gets a flat, resting script built
+# from its own real last close and average volume, loaded from the
+# generated replay_baseline.json -- so the universe can grow to any size
+# without anyone hand-picking plausible numbers for each new ticker.
+ACTORS: dict[str, list[tuple[int, float, int]]] = {
     # Real wk52 range [1258.80, 1584.97], avg_volume_20d ~10.5M.
     # Spike-and-revert: baseline sits just under the 52w high, the spike
     # genuinely breaches it on ~3.2x volume, then it reverts back under --
@@ -39,21 +47,71 @@ SCRIPTS: dict[str, list[tuple[int, float, int]]] = {
         (50, 24507.0, 295_000),
         (65, 24495.0, 302_000),
     ],
-    # The rest are quiet by design -- flat, mid-range prices with volume at
-    # their real baseline, so they correctly score near zero and stay out
-    # of the digest (the "suppressed_count" / restraint story).
-    "INFY.NS": [(0, 1450.0, 7_950_000)],
-    "HDFCBANK.NS": [(0, 900.0, 26_700_000)],
-    "ICICIBANK.NS": [(0, 1380.0, 8_770_000)],
-    "AXISBANK.NS": [(0, 1300.0, 4_790_000)],
-    "SBIN.NS": [(0, 1080.0, 8_340_000)],
-    "ITC.NS": [(0, 358.0, 14_100_000)],
-    "LT.NS": [(0, 4055.0, 1_300_000)],
-    "WIPRO.NS": [(0, 234.0, 7_940_000)],
 }
-DEFAULT_SCRIPT = [(0, 1000.0, 100_000)]  # fallback only for symbols not listed above
+
+_BASELINE_PATH = Path(__file__).resolve().parent / "replay_baseline.json"
+
+
+def _load_scripts() -> dict[str, list[tuple[int, float, int]]]:
+    """Hand-authored actors win; everything else rests at its real last
+    close. A symbol resting at its own last close has 0% change and a 1.0x
+    volume ratio, so it scores near zero and correctly stays out of the
+    digest -- which is what a quiet stock should do."""
+    scripts: dict[str, list[tuple[int, float, int]]] = {}
+
+    try:
+        resting = json.loads(_BASELINE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Missing or unreadable: the actors alone still drive the scenario.
+        # Better to run with a smaller universe than to invent prices.
+        resting = {}
+
+    for symbol, row in resting.items():
+        scripts[symbol] = [(0, float(row["price"]), int(row["volume"]))]
+
+    scripts.update(ACTORS)
+    return scripts
+
+
+SCRIPTS = _load_scripts()
+
+# Only reached by a symbol with neither an actor script nor a seeded
+# baseline -- which should not happen, since seeding writes both together.
+DEFAULT_SCRIPT = [(0, 1000.0, 100_000)]
 
 _START = datetime.now(timezone.utc)
+
+# Demo clock. Normally None -- the feed advances with real elapsed time.
+# Pinning it to a script minute lets a demo step through the scenario on
+# command instead of waiting an hour for it, while still driving the REAL
+# detection pipeline: nothing is injected, the scoring layer sees the same
+# quotes it would have seen live and reaches its own conclusions.
+#
+# `anchor_end` maps the scripted timeline onto REAL wall-clock time ending
+# now, so a replayed scenario lands in the recent past. Stamping it forward
+# from server start would put quotes up to an hour in the future, and a
+# future timestamp is never "since you last looked" -- the event would
+# resurface on every refresh no matter how many times you read it.
+_clock: dict[str, object] = {"pinned_minute": None, "anchor_end": None, "span": 0.0}
+
+
+def pin_minute(minute: float | None, anchor_end: datetime | None = None, span: float | None = None) -> None:
+    _clock["pinned_minute"] = minute
+    if anchor_end is not None:
+        _clock["anchor_end"] = anchor_end
+    if span is not None:
+        _clock["span"] = span
+
+
+def pinned_minute() -> float | None:
+    return _clock["pinned_minute"]
+
+
+def scenario_minutes() -> list[int]:
+    """Every distinct script minute across all symbols, in order -- the
+    full timeline a demo run should step through."""
+    minutes = {m for script in SCRIPTS.values() for m, _, _ in script}
+    return sorted(minutes)
 
 
 class ReplayProvider(PriceProvider):
@@ -62,24 +120,51 @@ class ReplayProvider(PriceProvider):
 
     def get_latest(self, symbol: str) -> Quote | None:
         script = SCRIPTS.get(symbol, DEFAULT_SCRIPT)
-        elapsed_min = (datetime.now(timezone.utc) - _START).total_seconds() / 60
+        pinned = _clock["pinned_minute"]
+        now = datetime.now(timezone.utc)
+
+        if pinned is None:
+            elapsed_min = (now - _START).total_seconds() / 60
+            observed_at = _START + timedelta(minutes=elapsed_min)
+        else:
+            elapsed_min = pinned
+            anchor_end = _clock["anchor_end"] or now
+            span = float(_clock["span"] or 0.0)
+            # Scenario minute -> real time, ending at the anchor.
+            observed_at = anchor_end - timedelta(minutes=span - elapsed_min)
+
         point = script[0]
         for candidate in script:
             if candidate[0] <= elapsed_min:
                 point = candidate
-        minute, price, volume = point
+        point_minute, price, volume = point
         prev_close = script[0][1]
+
+        # source_ts is the market time of the SCRIPT POINT -- when this price
+        # came into being. Polling the same unchanged quote ten times yields
+        # the same source_ts ten times, which is exactly what makes the
+        # `(symbol, source_ts)` dedup meaningful. fetched_at carries the
+        # poll time separately.
+        if pinned is None:
+            price_at = _START + timedelta(minutes=point_minute)
+        else:
+            anchor_end = _clock["anchor_end"] or now
+            span = float(_clock["span"] or 0.0)
+            price_at = anchor_end - timedelta(minutes=span - point_minute)
+
         return Quote(
             symbol=symbol,
             price=price,
             volume=volume,
             prev_close=prev_close,
-            source_ts=_START + timedelta(minutes=minute),
+            source_ts=price_at,
+            fetched_at=observed_at,
             source="replay",
         )
 
     def get_history(self, symbol: str, days: int) -> list[Quote]:
         script = SCRIPTS.get(symbol, DEFAULT_SCRIPT)
+        now = datetime.now(timezone.utc)
         return [
             Quote(
                 symbol=symbol,
@@ -87,6 +172,7 @@ class ReplayProvider(PriceProvider):
                 volume=volume,
                 prev_close=script[0][1],
                 source_ts=_START - timedelta(days=days) + timedelta(minutes=minute),
+                fetched_at=now,
                 source="replay",
             )
             for minute, price, volume in script

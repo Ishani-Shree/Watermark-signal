@@ -1,0 +1,10 @@
+name = "watermark-cron"
+main = "worker.js"
+compatibility_date = "2024-07-01"
+
+[triggers]
+# Every 10 minutes -- comfortably under Render free tier's ~15 min idle spin-down.
+crons = ["*/10 * * * *"]
+
+[vars]
+RENDER_API_URL = "https://watermark-signal.onrender.com"

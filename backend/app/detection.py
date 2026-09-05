@@ -142,7 +142,8 @@ def upsert_event(conn, now: datetime, price: float, score: ScoreResult) -> str |
     recent = conn.execute(
         text(
             """
-            SELECT id, cluster_key, last_updated_ts, peak_price, trough_price
+            SELECT id, cluster_key, last_updated_ts, peak_price, trough_price,
+                   score, reason_text, kind
             FROM events
             WHERE symbol = :symbol
             ORDER BY last_updated_ts DESC
@@ -159,6 +160,16 @@ def upsert_event(conn, now: datetime, price: float, score: ScoreResult) -> str |
     if is_extend:
         peak = max(float(recent["peak_price"] or price), price)
         trough = min(float(recent["trough_price"] or price), price)
+
+        # An event's headline is its PEAK reading, not its latest. A move
+        # that spiked hard and is now easing off should still be reported
+        # by what made it significant -- overwriting on every extension
+        # quietly waters the story down as the move decays.
+        keeps_old = float(recent["score"]) >= score.composite_score
+        headline_score = float(recent["score"]) if keeps_old else score.composite_score
+        headline_reason = recent["reason_text"] if keeps_old else score.reason_text
+        headline_kind = recent["kind"] if keeps_old else score.kind
+
         conn.execute(
             text(
                 """
@@ -169,12 +180,12 @@ def upsert_event(conn, now: datetime, price: float, score: ScoreResult) -> str |
                 """
             ),
             {
-                "score": score.composite_score,
-                "reason": score.reason_text,
+                "score": headline_score,
+                "reason": headline_reason,
                 "now": now,
                 "peak": peak,
                 "trough": trough,
-                "kind": score.kind,
+                "kind": headline_kind,
                 "id": recent["id"],
             },
         )

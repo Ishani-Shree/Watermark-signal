@@ -143,11 +143,14 @@ def run_ingest_cycle(conn) -> dict:
             {
                 "symbol": quote.symbol,
                 "source_ts": quote.source_ts,
+                "fetched_at": quote.fetched_at,
                 "price": quote.price,
                 "volume": quote.volume,
                 "prev_close": quote.prev_close,
                 "source": quote.source,
-                "confidence": confidence,
+                # A quote whose provider gave no market timestamp can't be
+                # deduped reliably; label it rather than pretend otherwise.
+                "confidence": confidence if quote.has_market_ts else "unverified_ts",
             }
         )
         quotes_out.append(
@@ -157,21 +160,52 @@ def run_ingest_cycle(conn) -> dict:
     # One batched round trip rather than one per symbol. The DB is remote,
     # so round trips -- not the inserts themselves -- are the cost that
     # grows with watchlist size.
+    #
+    # On conflict we refresh `fetched_at` only. The price row is immutable
+    # (that is the idempotency guarantee); re-seeing the same quote is not a
+    # new observation of a new price, but it IS evidence the pipeline is
+    # alive, and that belongs in fetched_at.
+    # Written as ONE statement over unnested arrays rather than executemany,
+    # because RETURNING is not available on executemany -- and the
+    # per-row insert/update flag is what makes the dedup guarantee
+    # observable instead of merely asserted.
     ingested = 0
+    refreshed = 0
     if rows_to_write:
         result = conn.execute(
             text(
                 """
                 INSERT INTO snapshots
-                    (symbol, source_ts, price, volume, prev_close, source, confidence)
-                VALUES
-                    (:symbol, :source_ts, :price, :volume, :prev_close, :source, :confidence)
-                ON CONFLICT (symbol, source_ts) DO NOTHING
+                    (symbol, source_ts, fetched_at, price, volume, prev_close, source, confidence)
+                SELECT * FROM unnest(
+                    CAST(:symbols AS text[]),
+                    CAST(:source_tss AS timestamptz[]),
+                    CAST(:fetched_ats AS timestamptz[]),
+                    CAST(:prices AS double precision[]),
+                    CAST(:volumes AS bigint[]),
+                    CAST(:prev_closes AS double precision[]),
+                    CAST(:sources AS text[]),
+                    CAST(:confidences AS text[])
+                )
+                ON CONFLICT (symbol, source_ts) DO UPDATE
+                    SET fetched_at = EXCLUDED.fetched_at
+                RETURNING (xmax = 0) AS inserted
                 """
             ),
-            rows_to_write,
+            {
+                "symbols": [r["symbol"] for r in rows_to_write],
+                "source_tss": [r["source_ts"] for r in rows_to_write],
+                "fetched_ats": [r["fetched_at"] for r in rows_to_write],
+                "prices": [float(r["price"]) for r in rows_to_write],
+                "volumes": [int(r["volume"]) for r in rows_to_write],
+                "prev_closes": [float(r["prev_close"]) for r in rows_to_write],
+                "sources": [r["source"] for r in rows_to_write],
+                "confidences": [r["confidence"] for r in rows_to_write],
+            },
         )
-        ingested = result.rowcount if result.rowcount is not None and result.rowcount >= 0 else len(rows_to_write)
+        flags = [row[0] for row in result.fetchall()]
+        ingested = sum(1 for f in flags if f)
+        refreshed = len(flags) - ingested
 
     for symbol, quote in quotes_by_symbol.items():
         if symbol in INDEX_SYMBOLS:
@@ -205,6 +239,9 @@ def run_ingest_cycle(conn) -> dict:
     return {
         "checked": len(symbol_info),
         "ingested": ingested,
+        # Non-zero means dedup did its job: the same quote arrived again and
+        # was not double-counted.
+        "deduped": refreshed,
         "events_touched": events_touched,
         "failed": len(failed_symbols),
         "breaker_tripped": breaker_tripped,
@@ -397,11 +434,12 @@ def get_watchlist(user_id: int = Depends(get_current_user_id)):
             text(
                 """
                 SELECT w.symbol, s.name, w.note, w.target_price, w.muted_kinds, w.added_at,
-                       latest.price, latest.source, latest.confidence, latest.source_ts
+                       latest.price, latest.source, latest.confidence,
+                       latest.source_ts, latest.fetched_at
                 FROM watchlist_items w
                 JOIN symbols s ON s.symbol = w.symbol
                 LEFT JOIN LATERAL (
-                    SELECT price, source, confidence, source_ts
+                    SELECT price, source, confidence, source_ts, fetched_at
                     FROM snapshots
                     WHERE snapshots.symbol = w.symbol
                     ORDER BY source_ts DESC

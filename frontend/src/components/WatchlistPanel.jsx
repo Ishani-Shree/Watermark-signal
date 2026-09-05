@@ -23,13 +23,13 @@ function timeAgo(iso) {
   return `${Math.round(mins / 1440)}d ago`;
 }
 
-/* Staleness is about AGE, not just what ingest recorded. A quote that was
-   'live' when written is still stale if nothing has arrived since — show
-   that plainly rather than smoothing it over. */
+/* Staleness is about whether WE are still polling (fetched_at), not about
+   how long ago the price last moved (source_ts). A stock that has not
+   traded for an hour is not stale data — it is an unchanged price, freshly
+   confirmed. Conflating the two would cry wolf on every quiet stock. */
 function freshness(item) {
-  if (!item.source_ts) return "none";
-  const mins = ageMinutes(item.source_ts);
-  if (mins > STALE_AFTER_MINUTES) return "stale";
+  if (!item.fetched_at) return "none";
+  if (ageMinutes(item.fetched_at) > STALE_AFTER_MINUTES) return "stale";
   return item.confidence || "none";
 }
 
@@ -58,7 +58,9 @@ function Holding({ item, onUpdate, onRemove }) {
           </div>
           <div className="holding__asof">
             <span className={`badge badge--${state}`}>{state}</span>
-            {timeAgo(item.source_ts)}
+            <span title="when this price is from · when we last checked">
+              quoted {timeAgo(item.source_ts)} · checked {timeAgo(item.fetched_at)}
+            </span>
           </div>
         </div>
       </div>

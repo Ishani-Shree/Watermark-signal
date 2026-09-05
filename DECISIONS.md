@@ -45,6 +45,34 @@ Format: date/hour, decision, alternative rejected, why.
   of the version-detection path catching it). `bcrypt` itself works fine;
   only passlib's compatibility shim was broken. Direct calls are also just
   simpler -- one less abstraction layer for two functions.
+- **Hour 32-35** — `source_ts` and `fetched_at` are now two genuinely
+  different things, closing the idempotency gap logged earlier. `source_ts`
+  is when the PRICE is from (the provider's market timestamp) and is the
+  dedup key; `fetched_at` is when WE polled. Collapsing them into poll time
+  meant a redelivered quote got a fresh timestamp and was written again --
+  the `(symbol, source_ts)` guard was correct but its input was not.
+  Verified: ingesting unchanged quotes three times gives 48 new, then 0 new
+  / 48 deduped, then 0 / 48.
+- **Hour 32-35** — On conflict the row refreshes `fetched_at` only; price
+  fields are immutable. Re-seeing a quote is not a new observation of a new
+  price, but it IS evidence the pipeline is alive, and that belongs in
+  `fetched_at`.
+- **Hour 32-35** — The batch write became a single `INSERT ... SELECT
+  unnest(...)` rather than executemany, because `RETURNING` is unavailable
+  on executemany, and the per-row insert/update flag is what makes the
+  dedup guarantee observable rather than merely asserted. Still one round
+  trip.
+- **Hour 32-35** — Staleness in the UI is keyed on `fetched_at`, not
+  `source_ts`. A stock that has not traded for an hour is not stale data --
+  it is an unchanged price, freshly confirmed. The earlier logic keyed on
+  price age would have shown a red STALE badge on every quiet stock while
+  polling was perfectly healthy, which is exactly the "market closed vs we
+  don't know" confusion BUILD_PLAN.md section 9 warns about. The row now
+  reads "quoted 65m ago · checked just now".
+- **Hour 32-35** — A quote whose provider supplies no market timestamp is
+  stored with confidence `unverified_ts` rather than silently falling back
+  to poll time. Dedup cannot be guaranteed for such a row, and that should
+  be visible in the data, not buried.
 - **Hour 28-32** — A failing provider degrades, it does not fail over to a
   different data source. Rejected: falling back to a second provider (or to
   the replay feed) when the primary is down. Why: that hands the user a

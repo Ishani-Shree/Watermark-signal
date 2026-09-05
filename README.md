@@ -167,8 +167,18 @@ scale, and building them now would be speculation dressed as engineering.
 The upstream (`yfinance`) is unofficial scraping. It broke once *during this
 build*, which shaped the following.
 
-- **Idempotent ingest** on `(symbol, source_ts)` — a redelivered fetch cannot
-  double-count.
+- **Two timestamps, deliberately.** `source_ts` is when the *price* is from
+  (the provider's market timestamp); `fetched_at` is when *we* polled. This is
+  not bookkeeping: it is the difference between "the price has not moved" and
+  "we have not looked". A stock that has not traded for an hour has an old
+  `source_ts` and a fresh `fetched_at`, and that is healthy — so the stale
+  badge keys on `fetched_at`, and a row reads *"quoted 65m ago · checked just
+  now"*.
+- **Idempotent ingest** on `(symbol, source_ts)`. Because `source_ts` is the
+  market timestamp, re-fetching an unchanged quote yields the same key and is
+  deduped. Measured: ingesting the same quotes three times gives 48 new, then
+  **0 new / 48 deduped**, then 0 / 48. On conflict only `fetched_at` is
+  refreshed — the price row is immutable.
 - **Latest is derived, never assumed.** "Current price" is always
   `MAX(source_ts)`, so an out-of-order arrival cannot corrupt what downstream
   code reads as current.
@@ -211,11 +221,11 @@ Naming these is a scoping decision, not an omission.
 - **Options, crypto, push notifications, charting beyond a sparkline, social
   features.**
 
-**Known gap, logged rather than hidden:** both providers stamp `source_ts` as
-*poll* time. The idempotency guard is correct, but its input is not yet — a
-genuine redelivery of the same upstream quote receives a fresh timestamp and so
-is not deduped. The fix is to use the provider's own market timestamp
-(`regularMarketTime`). See `DECISIONS.md`.
+**Known gap, logged rather than hidden:** fetching the market timestamp from
+yfinance requires `.info`, a heavier scrape than `fast_info`. We pay that cost
+per symbol rather than fabricate a timestamp; the right fix at scale is a batch
+quote endpoint, not a cheaper lie. A quote that arrives without a market
+timestamp is stored as `unverified_ts` so the affected rows are visible.
 
 ---
 
