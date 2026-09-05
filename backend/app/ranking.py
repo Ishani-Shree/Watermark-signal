@@ -19,6 +19,12 @@ FIRST_VISIT_LOOKBACK_HOURS = 24  # a brand-new user has no watermark to diff
 # against -- look back a bounded window rather than the symbol's entire history
 DIGEST_CAP = 3
 
+# A target price is the one signal that cannot live in the detection layer.
+# Detection is symbol-scoped and computed once for everyone; a target is
+# different for every user watching the same stock, so crossing one is
+# evaluated here, at read time, against that user's own number.
+TARGET_HIT_SCORE = 80.0
+
 # How far off its peak a price must sit before the move counts as reverted.
 # This is not just presentation: an event's headline describes the moment it
 # fired ("breaking 52-week high"), which becomes false once the price falls
@@ -159,6 +165,10 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
                 for e in symbol_events
             )
 
+    candidates.extend(
+        _target_crossings(conn, watchlist_rows, lookback_start, is_first_visit)
+    )
+
     candidates.sort(key=lambda c: c["score"], reverse=True)
     surfaced = candidates[:DIGEST_CAP]
     suppressed_count = max(0, len(candidates) - DIGEST_CAP)
@@ -173,6 +183,121 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
         "watched_count": len(watchlist_rows),
         "flagged_count": len({c["symbol"] for c in candidates}),
     }
+
+
+def classify_crossing(
+    target: float, then_px: float, now_px: float, high: float, low: float
+) -> tuple[str, float, bool] | None:
+    """Did the price cross `target` during the window?
+
+    Judged against the window's extremes, never its endpoints -- a stock
+    that shot past the target and came back has still hit it, and comparing
+    start to end is precisely the blindness this product exists to remove.
+
+    Returns (direction, extreme reached, whether it has since pulled back),
+    or None if no crossing happened.
+    """
+    if then_px < target <= high:
+        return "rose through", high, now_px < target
+    if then_px > target >= low:
+        return "fell through", low, now_px > target
+    return None
+
+
+def _target_crossings(conn, watchlist_rows, lookback_start, is_first_visit) -> list[dict]:
+    """Surface a target price the stock has crossed since the last visit.
+
+    Costs a round trip only for users who actually set a target -- the
+    feature is opt-in, so people who never use it never pay for it.
+
+    A *crossing* is required, not merely "price is past the target". A stock
+    that has sat above your target for a week is not news every time you
+    open the app; it was news the day it got there.
+
+    Crucially, the crossing is detected against the price EXTREMES over the
+    window, not its endpoints. Comparing where the price started to where it
+    ended would miss a stock that shot through your target and came back --
+    which is the exact failure this whole product exists to fix. It would be
+    absurd to reintroduce it here.
+    """
+    targets = {
+        row["symbol"]: float(row["target_price"])
+        for row in watchlist_rows
+        if row["target_price"] is not None
+        # Mute applies here too -- an attention filter you cannot turn down
+        # eventually becomes noise like everything else.
+        and "target_hit" not in (row["muted_kinds"] or [])
+    }
+    if not targets:
+        return []
+
+    rows = conn.execute(
+        text(
+            """
+            SELECT s.symbol,
+                   now_px.price  AS price_now,
+                   then_px.price AS price_then,
+                   window_px.high_price,
+                   window_px.low_price
+            FROM unnest(CAST(:symbols AS text[])) AS s(symbol)
+            LEFT JOIN LATERAL (
+                SELECT price FROM snapshots
+                WHERE snapshots.symbol = s.symbol
+                ORDER BY source_ts DESC LIMIT 1
+            ) now_px ON true
+            LEFT JOIN LATERAL (
+                SELECT price FROM snapshots
+                WHERE snapshots.symbol = s.symbol AND source_ts <= :since
+                ORDER BY source_ts DESC LIMIT 1
+            ) then_px ON true
+            LEFT JOIN LATERAL (
+                SELECT max(price) AS high_price, min(price) AS low_price
+                FROM snapshots
+                WHERE snapshots.symbol = s.symbol AND source_ts >= :since
+            ) window_px ON true
+            """
+        ),
+        {"symbols": list(targets), "since": lookback_start},
+    ).mappings().all()
+
+    crossings = []
+    for row in rows:
+        target = targets[row["symbol"]]
+        if row["price_now"] is None or row["price_then"] is None:
+            # No before-price to compare against (brand-new user, or a
+            # symbol with no history yet). Claiming a crossing here would be
+            # inventing an event that may have happened long ago.
+            continue
+
+        now_px = float(row["price_now"])
+        then_px = float(row["price_then"])
+        high = float(row["high_price"]) if row["high_price"] is not None else now_px
+        low = float(row["low_price"]) if row["low_price"] is not None else now_px
+
+        crossing = classify_crossing(target, then_px, now_px, high, low)
+        if crossing is None:
+            continue
+        direction, extreme, pulled_back = crossing
+        detail = f"reached {extreme:.2f}" if pulled_back else f"was {then_px:.2f}"
+
+        crossings.append(
+            {
+                "symbol": row["symbol"],
+                "kind": "target_hit",
+                "score": TARGET_HIT_SCORE,
+                "reason_text": (
+                    f"{row['symbol']}  {direction} your target {target:.2f} | "
+                    f"{detail} | now {now_px:.2f}"
+                    + (" | since pulled back" if pulled_back else "")
+                ),
+                "first_seen_ts": None,
+                "last_updated_ts": None,
+                "current_price": now_px,
+                "target_price": target,
+                "reverted": False,
+            }
+        )
+    return crossings
 
 
 def _has_reverted(symbol_events, current_price) -> bool:

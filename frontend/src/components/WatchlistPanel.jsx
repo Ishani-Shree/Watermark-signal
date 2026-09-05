@@ -5,6 +5,7 @@ const MUTABLE_KINDS = [
   { key: "vol_spike", label: "volume" },
   { key: "relative_move", label: "vs index" },
   { key: "level_breach", label: "52-week" },
+  { key: "target_hit", label: "target" },
 ];
 
 const STALE_AFTER_MINUTES = 30;
@@ -36,12 +37,28 @@ function freshness(item) {
 function Holding({ item, onUpdate, onRemove }) {
   const muted = new Set(item.muted_kinds || []);
   const state = freshness(item);
+  const [target, setTarget] = useState(
+    item.target_price != null ? String(item.target_price) : ""
+  );
+  const [note, setNote] = useState(item.note || "");
 
   function toggleMute(kind) {
     const next = new Set(muted);
     if (next.has(kind)) next.delete(kind);
     else next.add(kind);
     onUpdate(item.symbol, { muted_kinds: Array.from(next) });
+  }
+
+  function saveTarget(e) {
+    e.preventDefault();
+    const parsed = parseFloat(target);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    onUpdate(item.symbol, { target_price: parsed });
+  }
+
+  function saveNote() {
+    if (note === (item.note || "")) return; // nothing changed; skip the write
+    onUpdate(item.symbol, { note });
   }
 
   return (
@@ -65,7 +82,36 @@ function Holding({ item, onUpdate, onRemove }) {
         </div>
       </div>
 
+      <input
+        className="note-input"
+        type="text"
+        maxLength={120}
+        placeholder="Why are you watching this?"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        onBlur={saveNote}
+        onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+      />
+
       <div className="holding__controls">
+        <form className="target-form" onSubmit={saveTarget}>
+          <label className="mute-row__label" htmlFor={`target-${item.symbol}`}>
+            Target
+          </label>
+          <input
+            id={`target-${item.symbol}`}
+            className="target-input"
+            type="number"
+            step="0.01"
+            min="0"
+            inputMode="decimal"
+            placeholder="—"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            onBlur={saveTarget}
+          />
+        </form>
+
         <div className="mute-row">
           <span className="mute-row__label">Mute</span>
           {MUTABLE_KINDS.map((kind) => {

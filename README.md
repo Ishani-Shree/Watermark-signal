@@ -69,7 +69,27 @@ correctness matter, not presentation: an event's headline describes the moment
 it fired ("breaking 52-week high"), and that sentence becomes false once the
 price falls back. Reporting it as a bare event would state something untrue.
 
-### 1.4 Restraint is a feature
+### 1.4 Your target price is *yours*
+
+Set a target on any stock and you are told when the price crosses it. This is
+the one signal that **cannot** live in the detection layer: detection is
+symbol-scoped and computed once for everyone, but a target is different for
+every user watching the same stock — so it is evaluated at read time, against
+your own number. The architecture split earns its keep here rather than merely
+being asserted.
+
+Two rules make it trustworthy:
+
+- **Crossings are judged on the window's extremes, not its endpoints.** A stock
+  that shot through your target and came back has still hit it. Comparing where
+  the price started to where it ended is exactly the blindness §1.3 is about —
+  it would be absurd to reintroduce it here.
+- **A crossing is required, not "price is past the target".** A stock that has
+  sat above your number for a week is not news every time you open the app. If
+  it crossed and retreated, the digest says *"since pulled back"* rather than
+  claiming a hit next to a price nowhere near it.
+
+### 1.5 Restraint is a feature
 
 The digest is capped at 3 items and reports what it held back:
 
@@ -282,7 +302,7 @@ npm run dev
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-python -m pytest tests/ -q          # 50 tests, ~1s, no database needed
+python -m pytest tests/ -q          # 57 tests, ~1s, no database needed
 ```
 
 They deliberately cover judgement rather than arithmetic — that a quiet stock
@@ -332,7 +352,7 @@ fast-forward a live market, and that gate is the enforcement.
 
 ```
 backend/
-  tests/                 50 tests, no database required
+  tests/                 57 tests, no database required
   app/
     main.py              routes; ingest + detection cycle
     detection.py         scoring, hysteresis, clustering   (symbol-scoped)

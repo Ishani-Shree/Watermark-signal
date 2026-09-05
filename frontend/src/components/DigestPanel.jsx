@@ -13,7 +13,12 @@ const KIND_LABEL = {
   relative_move: "vs Index",
   level_breach: "52-week level",
   path_summary: "While you were away",
+  target_hit: "Your target",
 };
+
+function formatTs(iso) {
+  return iso ? new Date(iso).toLocaleString() : null;
+}
 
 function severityFor(score) {
   return SEVERITY.find((band) => score >= band.min);
@@ -121,14 +126,26 @@ function EventCard({ event }) {
               <dt>Signal type</dt>
               <dd>{KIND_LABEL[event.kind] || event.kind}</dd>
             </div>
-            <div className="detail-grid__item">
-              <dt>First seen</dt>
-              <dd>{new Date(event.first_seen_ts).toLocaleString()}</dd>
-            </div>
-            <div className="detail-grid__item">
-              <dt>Last active</dt>
-              <dd>{new Date(event.last_updated_ts).toLocaleString()}</dd>
-            </div>
+            {/* A target crossing is evaluated at read time against your own
+                number, so it has no stored event window. */}
+            {formatTs(event.first_seen_ts) && (
+              <div className="detail-grid__item">
+                <dt>First seen</dt>
+                <dd>{formatTs(event.first_seen_ts)}</dd>
+              </div>
+            )}
+            {formatTs(event.last_updated_ts) && (
+              <div className="detail-grid__item">
+                <dt>Last active</dt>
+                <dd>{formatTs(event.last_updated_ts)}</dd>
+              </div>
+            )}
+            {event.target_price != null && (
+              <div className="detail-grid__item">
+                <dt>Your target</dt>
+                <dd>{event.target_price.toFixed(2)}</dd>
+              </div>
+            )}
             {event.peak_price != null && (
               <div className="detail-grid__item">
                 <dt>Peak</dt>
@@ -208,7 +225,10 @@ export default function DigestPanel({ digest, loading, error }) {
       {hasEvents && (
         <div className="event-list">
           {digest.events.map((event) => (
-            <EventCard key={`${event.symbol}-${event.last_updated_ts}`} event={event} />
+            <EventCard
+              key={`${event.symbol}-${event.kind}-${event.last_updated_ts ?? "now"}`}
+              event={event}
+            />
           ))}
         </div>
       )}

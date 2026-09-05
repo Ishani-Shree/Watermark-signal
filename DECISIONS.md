@@ -45,6 +45,26 @@ Format: date/hour, decision, alternative rejected, why.
   of the version-detection path catching it). `bcrypt` itself works fine;
   only passlib's compatibility shim was broken. Direct calls are also just
   simpler -- one less abstraction layer for two functions.
+- **Hour 42-45** — Finished `target_price`, which had been stored, read and
+  passed around while doing nothing. A half-built feature reads as poor
+  scoping (BUILD_PLAN.md section 11), so the choice was wire it up or delete
+  it; the plan's own scoring spec names it, so it was wired up. It also
+  demonstrates the architecture rather than merely asserting it: a target is
+  different for every user watching the same stock, so it CANNOT live in the
+  symbol-scoped detection layer and is evaluated at read time. It costs a
+  round trip only for users who set one.
+- **Hour 42-45** — Target crossings are judged against the window's
+  EXTREMES, not its endpoints. The first implementation compared the price
+  at the watermark to the price now -- and missed RELIANCE crossing 1600 on
+  its way to 1639 and back to 1562, because both endpoints sit below the
+  target. That is precisely the blindness this product exists to fix, and I
+  had reintroduced it inside a new feature. Caught by testing the feature
+  against the demo scenario rather than a hand-picked case.
+- **Hour 42-45** — A crossing requires *crossing*, not "price is past the
+  target". A stock that has sat above your target for a week is not news
+  every time you open the app; it was news the day it got there. When it
+  crossed and came back the copy says "since pulled back", because "hit your
+  target" beside a price nowhere near it reads as a bug.
 - **Hour 32-35** — Load-tested the read path at 10,000 watchlist items
   (500 users x 20 symbols) and found the bottleneck was not where the
   README had assumed. The digest's own SQL executes in **0.13 ms**; a

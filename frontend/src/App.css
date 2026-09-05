@@ -925,6 +925,54 @@ button {
   border-top: 1px solid var(--hairline);
 }
 
+.note-input {
+  width: 100%;
+  margin-top: 0.65rem;
+  padding: 0.3rem 0;
+  border: none;
+  border-bottom: 1px dashed transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+}
+
+.note-input::placeholder {
+  color: #55554f;
+}
+
+.note-input:hover {
+  border-bottom-color: var(--hairline-strong);
+}
+
+.note-input:focus {
+  outline: none;
+  border-bottom-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.target-form {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-shrink: 0;
+}
+
+.target-input {
+  width: 90px;
+  padding: 0.22rem 0.45rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline-strong);
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.target-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .mute-row {
   display: flex;
   flex-wrap: wrap;

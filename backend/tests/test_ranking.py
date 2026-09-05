@@ -10,7 +10,12 @@ truth about where the price ended up.
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from app.ranking import REVERTED_OFF_PEAK_PCT, _aggregate_by_symbol, _has_reverted
+from app.ranking import (
+    REVERTED_OFF_PEAK_PCT,
+    _aggregate_by_symbol,
+    _has_reverted,
+    classify_crossing,
+)
 
 NOW = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
 
@@ -108,3 +113,47 @@ class TestPathSummary:
     def test_reason_string_is_ascii_only(self):
         [summary] = _aggregate_by_symbol([event()], {"RELIANCE.NS": 1562.0})
         summary["reason_text"].encode("ascii")
+
+
+class TestTargetCrossing:
+    """A target price is user-scoped, so it is evaluated at read time rather
+    than in the shared detection layer. The rule that matters: crossings are
+    judged on the window's EXTREMES, not its endpoints."""
+
+    def test_price_rising_through_the_target_is_a_hit(self):
+        result = classify_crossing(target=1600, then_px=1560, now_px=1650, high=1650, low=1560)
+        assert result is not None
+        direction, extreme, pulled_back = result
+        assert direction == "rose through"
+        assert pulled_back is False
+
+    def test_spike_through_the_target_and_back_is_still_a_hit(self):
+        # The whole point: start 1560, end 1562, but it reached 1639 in
+        # between. Comparing endpoints alone would miss this entirely.
+        result = classify_crossing(target=1600, then_px=1560, now_px=1562, high=1639.6, low=1560)
+        assert result is not None
+        direction, extreme, pulled_back = result
+        assert direction == "rose through"
+        assert extreme == 1639.6
+        assert pulled_back is True  # so the copy can say "since pulled back"
+
+    def test_price_falling_through_the_target_is_a_hit(self):
+        result = classify_crossing(target=250, then_px=280, now_px=240, high=280, low=240)
+        assert result is not None
+        assert result[0] == "fell through"
+
+    def test_dip_through_the_target_and_back_is_still_a_hit(self):
+        result = classify_crossing(target=250, then_px=280, now_px=275, high=280, low=245)
+        assert result is not None
+        assert result[0] == "fell through"
+        assert result[2] is True
+
+    def test_never_reaching_the_target_is_not_a_hit(self):
+        assert classify_crossing(target=2000, then_px=1560, now_px=1562, high=1639.6, low=1560) is None
+
+    def test_already_past_the_target_before_the_window_is_not_a_hit(self):
+        # It was news the day it got there, not every time you open the app.
+        assert classify_crossing(target=1500, then_px=1560, now_px=1600, high=1650, low=1560) is None
+
+    def test_touching_the_target_exactly_counts(self):
+        assert classify_crossing(target=1600, then_px=1560, now_px=1600, high=1600, low=1560) is not None
