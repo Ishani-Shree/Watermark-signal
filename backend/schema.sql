@@ -60,7 +60,12 @@ CREATE TABLE users (
     id            BIGSERIAL PRIMARY KEY,
     email         TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- How much the digest is allowed to hold back. An attention filter the
+    -- user cannot tune eventually becomes noise, and the failure people
+    -- actually fear is the false negative -- so the filtering has a dial and
+    -- an escape hatch, not just an on/off mute.
+    sensitivity   TEXT NOT NULL DEFAULT 'balanced'  -- 'quiet'|'balanced'|'everything'
 );
 
 CREATE TABLE watchlist_items (

@@ -98,9 +98,25 @@ The digest is capped at 3 items and reports what it held back:
 
 Restraint is only legible against the size of what was checked, which is why
 the digest returns `flagged_count` / `watched_count` rather than only a
-suppressed count. Users can mute any signal kind per symbol; the failure mode
-people actually fear is the false negative, so muting is per-signal rather than
-all-or-nothing.
+suppressed count.
+
+**And restraint you cannot inspect is just data loss.** The failure people
+actually fear is the one they were never shown, so the filtering has a dial and
+an escape hatch, not just an on/off mute:
+
+- **Sensitivity** — *only the big stuff* / *balanced* / *show me everything*,
+  saved per user.
+- **"Show me everything"** — a one-off peek that drops the cap and the
+  threshold and includes muted signals, each tagged `muted` rather than quietly
+  mixed in. Peeking deliberately does **not** mark the digest as read: looking
+  at what was hidden must not consume what you have not seen.
+- Muted stocks are never counted as ones that "stayed quiet" — that number is
+  reported separately, because misreporting its own filtering is the worst bug
+  a filtering product can have.
+
+These are ranking-side dials only. Detection is symbol-scoped and computed once
+for everyone, so its threshold cannot vary per user; what varies is how much of
+the result each person is shown.
 
 ---
 
@@ -385,10 +401,13 @@ not because live data was out of reach.
 backend/
   tests/                 57 tests, no database required
   app/
-    main.py              routes; ingest + detection cycle
+    main.py              app assembly only (50 lines)
+    routers/             HTTP surface: auth, watchlist, digest, demo, meta
+    ingest.py            ingest + detection cycle
     detection.py         scoring, hysteresis, clustering   (symbol-scoped)
     ranking.py           digest, watermark, materiality    (user-scoped)
     provider_health.py   circuit breaker + chaos switch
+    ratelimit.py         per-IP limiter for the auth routes
     providers/           adapter boundary: base, guarded, yfinance, replay
   scripts/seed_baselines.py
   schema.sql

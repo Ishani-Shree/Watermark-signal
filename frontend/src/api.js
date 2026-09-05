@@ -55,11 +55,20 @@ export const api = {
   getWatchlist: () => request("/watchlist"),
   addToWatchlist: (symbol, note, target_price) =>
     request("/watchlist", { method: "POST", body: JSON.stringify({ symbol, note, target_price }) }),
+  // A delta, not a whole-array replace -- two devices toggling different
+  // signals at once compose instead of clobbering each other.
+  toggleMute: (symbol, kind, muted) =>
+    request(`/watchlist/${encodeURIComponent(symbol)}/mute`, {
+      method: "POST",
+      body: JSON.stringify({ kind, muted }),
+    }),
   updateWatchlistItem: (symbol, patch) =>
     request(`/watchlist/${encodeURIComponent(symbol)}`, { method: "PATCH", body: JSON.stringify(patch) }),
   removeFromWatchlist: (symbol) =>
     request(`/watchlist/${encodeURIComponent(symbol)}`, { method: "DELETE" }),
-  getDigest: () => request("/digest"),
+  getDigest: (showAll = false) => request(`/digest${showAll ? "?show_all=true" : ""}`),
+  setSensitivity: (sensitivity) =>
+    request("/settings/sensitivity", { method: "PUT", body: JSON.stringify({ sensitivity }) }),
   ackDigest: (cursor) =>
     request("/digest/ack", { method: "POST", body: JSON.stringify({ cursor }) }),
   runScenario: () => request("/demo/run-scenario", { method: "POST" }),

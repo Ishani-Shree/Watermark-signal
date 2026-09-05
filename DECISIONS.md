@@ -45,6 +45,37 @@ Format: date/hour, decision, alternative rejected, why.
   of the version-detection path catching it). `bcrypt` itself works fine;
   only passlib's compatibility shim was broken. Direct calls are also just
   simpler -- one less abstraction layer for two functions.
+- **Hour 45+ — the escape hatch, finally built.** BUILD_PLAN.md section 9
+  promised "mute + escape hatch ... plus a 'show everything' view", and only
+  the mute half shipped. A filter is only trustworthy if you can see what it
+  held back -- the failure people actually fear is the one they were never
+  shown. There is now a saved sensitivity per user (quiet / balanced /
+  everything) and a one-off "show me everything" that reveals suppressed AND
+  muted items, each labelled `muted` rather than silently included. Peeking
+  deliberately does not acknowledge the digest: looking at what was hidden
+  must not mark unseen signals as read.
+- **Hour 45+** — Sensitivity is a RANKING-side dial only. Detection is
+  symbol-scoped and computed once for everyone, so its threshold cannot vary
+  per user; what varies is how much of the result each person is shown. The
+  alternative -- per-user detection thresholds -- would multiply the
+  expensive work by the number of users and destroy the architecture's main
+  property.
+- **Hour 45+** — `main.py` split from 792 lines into `routers/` (auth,
+  watchlist, digest, demo, meta) plus `ingest.py`; the module is now 50
+  lines that only assemble the app. Rejected: leaving it, on the grounds
+  that it worked. It did work -- but "maintainability without unnecessary
+  over-engineering" is a judged dimension, and a 792-line module with 18
+  routes, request models and the ingest cycle in one file is the wrong
+  answer to it. Handler bodies moved unchanged; the 57 tests plus a full
+  endpoint sweep caught the one thing that broke (a missing `health`
+  import in the extracted ingest module).
+- **Hour 45+** — Mute is now a delta (`POST /watchlist/{symbol}/mute` with
+  one kind on or off) rather than only a whole-array PATCH. The array
+  replace has a lost-update window: two devices toggling different signals
+  each send a list computed from the state they last saw, so the second
+  write silently undoes the first. The delta is applied by the database to
+  whatever is actually stored, is idempotent on repeat, and closes the race
+  where it belongs rather than papering over it in the client.
 - **Hour 45+ — the deployment runs on LIVE data.** The replay feed was
   chosen partly on an untested claim from our own plan: that yfinance would
   be rate-limited from a datacenter IP. `/diagnostics/live-provider` was

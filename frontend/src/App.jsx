@@ -16,6 +16,28 @@ function App() {
   const [health, setHealth] = useState(null);
 
   const [actionError, setActionError] = useState(null);
+  // A one-off "show me everything", separate from the saved preference --
+  // the user should be able to peek without changing a setting back.
+  const [showEverything, setShowEverything] = useState(false);
+
+  async function toggleShowEverything() {
+    const next = !showEverything;
+    setShowEverything(next);
+    // Never ack the escape-hatch view: peeking at what was held back must
+    // not mark unseen signals as read.
+    await refreshAll({ showAll: next });
+  }
+
+  async function changeSensitivity(level) {
+    setActionError(null);
+    try {
+      await api.setSensitivity(level);
+      setShowEverything(false);
+      await refreshAll({ showAll: false });
+    } catch (err) {
+      setActionError(err.message);
+    }
+  }
 
   // A 401 anywhere clears the token; drop straight back to the login form
   // rather than stranding the user on an error screen.
@@ -29,14 +51,14 @@ function App() {
     return () => window.removeEventListener("watermark:unauthorized", onUnauthorized);
   }, []);
 
-  async function refreshAll({ ack = false } = {}) {
+  async function refreshAll({ ack = false, showAll = showEverything } = {}) {
     setDigestLoading(true);
     setDigestError(null);
     // Settled, not all: a failing /symbols call must not discard a perfectly
     // good digest and show "couldn't load your digest".
     const [digestResult, watchlistResult, symbolsResult, healthResult] =
       await Promise.allSettled([
-        api.getDigest(),
+        api.getDigest(showAll),
         api.getWatchlist(),
         api.getSymbols(),
         api.getHealth(),
@@ -80,6 +102,8 @@ function App() {
   const handleUpdate = (symbol, patch) =>
     mutate(() => api.updateWatchlistItem(symbol, patch));
   const handleRemove = (symbol) => mutate(() => api.removeFromWatchlist(symbol));
+  const handleToggleMute = (symbol, kind, muted) =>
+    mutate(() => api.toggleMute(symbol, kind, muted));
 
   function logout() {
     clearToken();
@@ -149,7 +173,14 @@ function App() {
         </div>
       )}
 
-      <DigestPanel digest={digest} loading={digestLoading} error={digestError} />
+      <DigestPanel
+        digest={digest}
+        loading={digestLoading}
+        error={digestError}
+        showEverything={showEverything}
+        onToggleShowEverything={toggleShowEverything}
+        onChangeSensitivity={changeSensitivity}
+      />
 
       <WatchlistPanel
         items={watchlist}
@@ -157,6 +188,7 @@ function App() {
         onAdd={handleAdd}
         onUpdate={handleUpdate}
         onRemove={handleRemove}
+        onToggleMute={handleToggleMute}
       />
     </div>
   );

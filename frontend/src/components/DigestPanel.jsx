@@ -90,7 +90,12 @@ function EventCard({ event }) {
             <span className="event__symbol">{event.symbol}</span>
             <span className="event__kind">{KIND_LABEL[event.kind] || event.kind}</span>
           </div>
-          <span className={`severity severity--${severity.key}`}>{severity.label}</span>
+          <span className="event__flags">
+            {/* Only appears in the everything view, where muted items are
+                shown rather than dropped -- so it is never a surprise. */}
+            {event.muted && <span className="muted-tag">muted</span>}
+            <span className={`severity severity--${severity.key}`}>{severity.label}</span>
+          </span>
         </div>
 
         {signals.length > 0 && (
@@ -175,7 +180,20 @@ function EventCard({ event }) {
   );
 }
 
-export default function DigestPanel({ digest, loading, error }) {
+const SENSITIVITY_LEVELS = [
+  { key: "quiet", label: "Only the big stuff" },
+  { key: "balanced", label: "Balanced" },
+  { key: "everything", label: "Show me everything" },
+];
+
+export default function DigestPanel({
+  digest,
+  loading,
+  error,
+  showEverything,
+  onToggleShowEverything,
+  onChangeSensitivity,
+}) {
   if (loading) {
     return (
       <section className="digest">
@@ -255,8 +273,40 @@ export default function DigestPanel({ digest, loading, error }) {
             ` ${digest.muted_count} had signals you've muted.`}
           {digest.suppressed_count > 0 &&
             ` ${digest.suppressed_count} ranked below the cut.`}
+
+          {/* The escape hatch. A filter is only trustworthy if you can see
+              what it held back -- the failure people fear is the one they
+              were never shown. */}
+          {(digest.suppressed_count > 0 || digest.muted_count > 0 || showEverything) && (
+            <button type="button" className="link-button show-all" onClick={onToggleShowEverything}>
+              {showEverything ? "Back to filtered view" : "Show me everything"}
+            </button>
+          )}
         </p>
       )}
+
+      {showEverything && (
+        <p className="escape-note">
+          Nothing hidden — no cap, no threshold, muted signals included. This is a
+          peek, so it does not mark anything as read.
+        </p>
+      )}
+
+      <div className="sensitivity">
+        <span className="sensitivity__label">How much should we hold back?</span>
+        {SENSITIVITY_LEVELS.map((level) => (
+          <button
+            type="button"
+            key={level.key}
+            className={`sensitivity__option ${
+              digest.saved_sensitivity === level.key ? "sensitivity__option--on" : ""
+            }`}
+            onClick={() => onChangeSensitivity(level.key)}
+          >
+            {level.label}
+          </button>
+        ))}
+      </div>
     </section>
   );
 }

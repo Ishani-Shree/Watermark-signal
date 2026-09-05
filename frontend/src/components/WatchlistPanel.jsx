@@ -34,7 +34,7 @@ function freshness(item) {
   return item.confidence || "none";
 }
 
-function Holding({ item, onUpdate, onRemove }) {
+function Holding({ item, onUpdate, onRemove, onToggleMute }) {
   /* Held locally, not derived from props on every render. PATCH replaces the
      whole muted_kinds array, so two quick toggles both computed from the
      same stale prop would make the second silently undo the first. */
@@ -50,11 +50,14 @@ function Holding({ item, onUpdate, onRemove }) {
   const [note, setNote] = useState(item.note || "");
 
   function toggleMute(kind) {
+    const willMute = !muted.has(kind);
     const next = new Set(muted);
-    if (next.has(kind)) next.delete(kind);
-    else next.add(kind);
+    if (willMute) next.add(kind);
+    else next.delete(kind);
     setMuted(next); // optimistic, so a fast second click builds on the first
-    onUpdate(item.symbol, { muted_kinds: Array.from(next) });
+    // Sent as a delta: the server applies it to whatever is actually stored,
+    // so a concurrent toggle from another device cannot be overwritten.
+    onToggleMute(item.symbol, kind, willMute);
   }
 
   function saveTarget(e) {
@@ -184,7 +187,14 @@ function Holding({ item, onUpdate, onRemove }) {
   );
 }
 
-export default function WatchlistPanel({ items, symbols, onAdd, onUpdate, onRemove }) {
+export default function WatchlistPanel({
+  items,
+  symbols,
+  onAdd,
+  onUpdate,
+  onRemove,
+  onToggleMute,
+}) {
   const [selected, setSelected] = useState("");
 
   function submitAdd(e) {
@@ -227,7 +237,13 @@ export default function WatchlistPanel({ items, symbols, onAdd, onUpdate, onRemo
       ) : (
         <div className="holding-list">
           {items.map((item) => (
-            <Holding key={item.symbol} item={item} onUpdate={onUpdate} onRemove={onRemove} />
+            <Holding
+              key={item.symbol}
+              item={item}
+              onUpdate={onUpdate}
+              onRemove={onRemove}
+              onToggleMute={onToggleMute}
+            />
           ))}
         </div>
       )}

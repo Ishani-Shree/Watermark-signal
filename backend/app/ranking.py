@@ -23,6 +23,23 @@ LONG_GAP_RAISE_THRESHOLD = 65  # above SHORT_GAP_MINUTES, raise the bar so a
 FIRST_VISIT_LOOKBACK_HOURS = 72
 DIGEST_CAP = 3
 
+# How hard the digest filters, per user. The product's whole claim is that it
+# holds things back -- which is only trustworthy if the user can see what was
+# held and turn the filtering down. BUILD_PLAN.md section 9: "the failure mode
+# users actually fear is the false negative."
+#
+# Note these are RANKING-side dials only. The detection threshold is
+# symbol-scoped and computed once for everyone, so it cannot vary per user;
+# what varies is how much of the result each person is shown.
+SENSITIVITY = {
+    "quiet": {"cap": 2, "min_score": 70.0, "include_muted": False},
+    "balanced": {"cap": DIGEST_CAP, "min_score": 0.0, "include_muted": False},
+    # The escape hatch: nothing capped, nothing hidden, muted items shown
+    # and labelled as muted rather than dropped.
+    "everything": {"cap": 100, "min_score": 0.0, "include_muted": True},
+}
+DEFAULT_SENSITIVITY = "balanced"
+
 # A target price is the one signal that cannot live in the detection layer.
 # Detection is symbol-scoped and computed once for everyone; a target is
 # different for every user watching the same stock, so crossing one is
@@ -37,7 +54,10 @@ TARGET_HIT_SCORE = 80.0
 REVERTED_OFF_PEAK_PCT = 0.02
 
 
-def build_digest(conn, user_id: int, now: datetime) -> dict:
+def build_digest(conn, user_id: int, now: datetime, show_all: bool = False) -> dict:
+    """`show_all` is a one-off override of the user's saved sensitivity --
+    the "show me everything" link, which must work without making them
+    change a setting and change it back."""
     # Watermark and watchlist in ONE round trip. Measured: the database work
     # for a digest is ~0.1ms, while a single round trip to a hosted Postgres
     # costs ~400ms -- so the count of queries, not their cost, is what makes
@@ -50,9 +70,10 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
     rows = conn.execute(
         text(
             """
-            SELECT r.last_viewed_at AS watermark,
+            SELECT r.last_viewed_at AS watermark, usr.sensitivity,
                    w.symbol, w.muted_kinds, w.target_price, w.note
             FROM (SELECT CAST(:uid AS bigint) AS uid) u
+            JOIN users usr ON usr.id = u.uid
             LEFT JOIN read_state r ON r.user_id = u.uid
             LEFT JOIN watchlist_items w ON w.user_id = u.uid
             """
@@ -62,6 +83,10 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
 
     watermark_ts = rows[0]["watermark"] if rows else None
     watchlist_rows = [r for r in rows if r["symbol"] is not None]
+
+    saved = (rows[0]["sensitivity"] if rows else None) or DEFAULT_SENSITIVITY
+    active = "everything" if show_all else saved
+    tuning = SENSITIVITY.get(active, SENSITIVITY[DEFAULT_SENSITIVITY])
 
     # Clock skew: a watermark ahead of now would make lookback_start a future
     # instant, so `last_updated_ts >= lookback_start` matches nothing and the
@@ -130,11 +155,17 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
         muted = watchlist_by_symbol[row["symbol"]]["muted_kinds"] or []
         return row["kind"] in muted
 
-    events = [e for e in event_rows if not is_muted(e)]
     # Counted, not just dropped. Reporting a silenced stock as one that
     # "stayed quiet" is a lie, and honesty about what was filtered is the
     # entire pitch of this product.
     muted_symbols = {e["symbol"] for e in event_rows if is_muted(e)}
+    # On the escape hatch nothing is dropped -- muted items come through and
+    # are labelled, because "show me everything" has to mean everything.
+    events = [
+        dict(e, muted=is_muted(e))
+        for e in event_rows
+        if tuning["include_muted"] or not is_muted(e)
+    ]
 
     # Current price came back joined to each event above. The revert story
     # needs where the price is NOW, not just where the event peaked --
@@ -164,7 +195,8 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
     for symbol, symbol_events in by_symbol.items():
         if is_long_gap or _has_reverted(symbol_events, latest_prices.get(symbol)):
             summary = _aggregate_by_symbol(symbol_events, latest_prices)
-            if is_long_gap:
+            # The escape hatch never raises the bar -- that is the point of it.
+            if is_long_gap and not tuning["include_muted"]:
                 kept = [s for s in summary if s["score"] >= LONG_GAP_RAISE_THRESHOLD]
                 below_bar += len(summary) - len(kept)
                 summary = kept
@@ -179,6 +211,7 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
                     "first_seen_ts": e["first_seen_ts"].isoformat(),
                     "last_updated_ts": e["last_updated_ts"].isoformat(),
                     "reverted": False,
+                    "muted": e.get("muted", False),
                 }
                 for e in symbol_events
             )
@@ -187,9 +220,16 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
     candidates.extend(crossings)
     fired_symbols.update(c["symbol"] for c in crossings)
 
+    # The user's own sensitivity dial, applied last.
+    if tuning["min_score"] > 0:
+        above = [c for c in candidates if c["score"] >= tuning["min_score"]]
+        below_bar += len(candidates) - len(above)
+        candidates = above
+
     candidates.sort(key=lambda c: c["score"], reverse=True)
-    surfaced = candidates[:DIGEST_CAP]
-    suppressed_count = max(0, len(candidates) - DIGEST_CAP) + below_bar
+    cap = tuning["cap"]
+    surfaced = candidates[:cap]
+    suppressed_count = max(0, len(candidates) - cap) + below_bar
 
     return {
         "mode": mode,
@@ -203,6 +243,10 @@ def build_digest(conn, user_id: int, now: datetime) -> dict:
         # "1 of 40" says something that a bare event count cannot.
         "watched_count": len(watchlist_rows),
         "flagged_count": len(fired_symbols),
+        # Which dial produced this view, and which one is saved -- so the UI
+        # can say "you are seeing everything" without lying about the setting.
+        "sensitivity": active,
+        "saved_sensitivity": saved,
         # The instant this digest reflects. The client acks this value, so a
         # signal arriving mid-render is not skipped over.
         "cursor": now.isoformat(),
@@ -374,10 +418,12 @@ def _aggregate_by_symbol(events, latest_prices: dict[str, float]) -> list[dict]:
                 "trough_price": None,
                 "first_seen_ts": e["first_seen_ts"],
                 "last_updated_ts": e["last_updated_ts"],
+                "muted": False,
             },
         )
         agg["score"] = max(agg["score"], float(e["score"]))
         agg["event_count"] += 1
+        agg["muted"] = agg["muted"] or bool(e.get("muted"))
 
         # Postgres NUMERIC arrives as Decimal -- normalise to float on the
         # way in so nothing downstream mixes the two types. Compare with
@@ -430,6 +476,9 @@ def _aggregate_by_symbol(events, latest_prices: dict[str, float]) -> list[dict]:
                 "current_price": current,
                 "event_count": count,
                 "reverted": reverted,
+                # Carried through the aggregation, or the everything view
+                # would show a muted symbol without saying it was muted.
+                "muted": agg["muted"],
             }
         )
     return results
